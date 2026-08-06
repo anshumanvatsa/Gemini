@@ -1,0 +1,62 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+*.egg
+.eggs/
+
+# Virtual environments
+venv/
+env/
+.venv/
+ENV/
+
+# Large model files (tracked separately via Git LFS or excluded)
+models/saved/*.joblib
+models/saved/*.pt
+models/saved/*.log
+
+# Large datasets (never commit raw data)
+scraper_pipeline/data_exports/
+phase2/data/raw_datasets/
+*.csv
+
+# API keys / secrets
+.env
+*.env
+config/secrets.py
+
+# Vision / temp uploads
+api/uploads/
+*.tmp
+
+# Server logs
+server.log
+server_err.log
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# pytest / coverage
+.pytest_cache/
+htmlcov/
+.coverage
+coverage.xml
