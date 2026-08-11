@@ -512,7 +512,7 @@ for fname in ['my-datasat.csv','posts.csv','instagram_posts.csv',
 for fpath in glob.glob(f'{RAW}/instagram_real/**/*.csv', recursive=True):
     fname = os.path.basename(fpath)
     if fname in ['instagram.csv','Instagram_data_by_Bhanu.csv',
-                 'comments_cleaned.csv']: continue  # already handled
+                 'comments_cleaned.csv', 'social_media_dataset.csv']: continue  # omenkj=fake AI text
     try:
         df = pd.read_csv(fpath, encoding='latin1', on_bad_lines='skip', nrows=5)
         df.columns = [c.lower().strip() for c in df.columns]
@@ -606,24 +606,108 @@ try:
     print(f"  Social engagement: {len(se_rows):,}")
 except Exception as e: print(f"  Social engagement: {e}")
 
+# ── V6 NEW: Instagram_Analytics.csv (30K structured, direct label) ──────────
+# 8264 Kaggle downloads, 85 votes, 1.0 usability. Direct performance_bucket_label.
+# viral+high=1 (HIGH), medium+low=0 (LOW). Best structured Instagram source.
+try:
+    ia = pd.read_csv(f'{RAW}/instagram_real/Instagram_Analytics.csv',
+                     encoding='latin1', on_bad_lines='skip')
+    ia.columns = [c.lower().strip().replace(' ','_') for c in ia.columns]
+    ia_rows = []
+    # Map label: viral/high → HIGH=1, medium/low → LOW=0
+    label_map = {'viral':1,'high':1,'medium':0,'low':0}
+    for _, r in ia.iterrows():
+        lbl = label_map.get(str(r.get('performance_bucket_label','')).lower(), -1)
+        if lbl < 0: continue
+        caption_len = _safe_float(r.get('caption_length', 100))
+        hashtags    = _safe_float(r.get('hashtags_count', 0))
+        cta         = float(str(r.get('has_call_to_action', 0)) in ['1', 'True', 'true', '1.0'])
+        hour        = _safe_int(r.get('post_hour', 12)) % 24
+        wday        = _wday(r.get('day_of_week', 'Wednesday'))
+        followers   = max(_safe_float(r.get('follower_count', 10000)), 1)
+        media_type  = str(r.get('media_type', '') or '').lower()
+        is_video    = float(any(x in media_type for x in ['video','reel']))
+        er          = _safe_float(r.get('engagement_rate', 0.04))
+        category    = str(r.get('content_category', '') or '').lower()
+        # Build pseudo-text from category + cta signal (ensures NLP sees something)
+        pseudo_text = f"{category} " * 3
+        if cta: pseudo_text += "comment share follow tag "
+        if is_video: pseudo_text += "watch video "
+        # Derive likes from ER × followers (approximate)
+        approx_likes = max(er * followers * 0.7, 1)
+        approx_saves = max(er * followers * 0.2, 0)
+        ia_rows.append({'platform':'instagram','text':pseudo_text,
+            'likes':approx_likes,'comments':approx_likes*0.15,
+            'shares':approx_saves,'views':followers*0.6,'followers':followers,
+            'post_hour':hour,'post_weekday':wday,'hashtag_count':hashtags,
+            'has_media':1,'is_video':is_video,'is_paid':0,
+            '_sentiment_override':None,'_cta_override':cta,
+            '_direct_label':lbl})
+    ia_df = pd.DataFrame(ia_rows)
+    all_dfs.append(ia_df)
+    print(f"  Instagram Analytics (structured 30K): {len(ia_rows):,} (HIGH={ia_df['_direct_label'].sum():,})")
+except Exception as e: print(f"  Instagram Analytics: {e}")
+
+# ── V6 NEW: sustainability_social_media_posts.csv (real text, all platforms) ─
+# 3144 real social posts with post_text + user_followers + engagement
+# Covers LinkedIn:438, Facebook:445, Instagram:451, TikTok:446, X:455
+try:
+    sust = pd.read_csv(f'{RAW}/social_real/sustainability_social_media_posts.csv',
+                       encoding='latin1', on_bad_lines='skip')
+    sust.columns = [c.lower().strip() for c in sust.columns]
+    PLAT_MAP_SUST = {'x':'twitter','instagram':'instagram','linkedin':'linkedin',
+                     'tiktok':'tiktok','facebook':'facebook','reddit':'reddit',
+                     'medium':'reddit'}  # map medium→reddit as closest
+    sust_rows = []
+    for _, r in sust.iterrows():
+        raw_plat = str(r.get('platform','') or '').lower()
+        plat = PLAT_MAP_SUST.get(raw_plat, '')
+        if not plat or plat not in PLATFORMS: continue
+        text = str(r.get('post_text','') or '')
+        if len(text) < 5: continue
+        followers = max(_safe_float(r.get('user_followers', 5000)), 1)
+        cta = float(str(r.get('call_to_action','')) in ['1','True','true','yes','1.0'])
+        sust_rows.append({'platform':plat,'text':text,
+            'likes':_safe_float(r.get('engagement_likes',0)),
+            'comments':_safe_float(r.get('engagement_comments',0)),
+            'shares':_safe_float(r.get('engagement_shares',0)),
+            'views':max(followers*0.5, 1),'followers':followers,
+            'post_hour':12,'post_weekday':2,'hashtag_count':text.count('#'),
+            'has_media':1,'is_video':0,'is_paid':0,
+            '_sentiment_override':None,'_cta_override':cta,
+            '_direct_label':None})
+    all_dfs.append(pd.DataFrame(sust_rows))
+    from collections import Counter
+    pc = Counter(r['platform'] for r in sust_rows)
+    print(f"  Sustainability posts (real text): {len(sust_rows):,} {dict(pc)}")
+except Exception as e: print(f"  Sustainability posts: {e}")
+
+
+
 # ── Combine ───────────────────────────────────────────────────────────────────
 combined = pd.concat(all_dfs, ignore_index=True)
-for col in ['_sentiment_override','_cta_override']:
+for col in ['_sentiment_override','_cta_override','_direct_label']:
     if col not in combined.columns: combined[col] = np.nan
 print(f"\nCOMBINED RAW: {len(combined):,}")
 print(f"Platforms: {combined['platform'].value_counts().to_dict()}")
+direct_mask = combined['_direct_label'].notna()
+print(f"Direct-labeled rows (Instagram Analytics): {direct_mask.sum():,}")
 
 # ── STEP 2: LABELS ────────────────────────────────────────────────────────────
-print("\n" + "="*65); print("STEP 2 — Normalized ER labels")
+print("\n" + "="*65); print("STEP 2 — Normalized ER labels (+ direct labels for IG Analytics)")
 combined['followers_clip'] = combined['followers'].clip(lower=1)
 combined['raw_er'] = (combined['likes']+combined['comments']+
                       combined['shares'])/combined['followers_clip']
-plat_med = combined.groupby('platform')['raw_er'].median()
-print("Platform median ER:")
+# Compute median only on rows that will use ER labeling (exclude direct-labeled)
+er_rows = combined[~direct_mask]
+plat_med = er_rows.groupby('platform')['raw_er'].median()
+print("Platform median ER (ER-labeled rows only):")
 for p, m in plat_med.items(): print(f"  {p:<12} {m:.4f}")
 combined['platform_med_er'] = combined['platform'].map(plat_med).clip(lower=1e-8)
 combined['norm_er']  = combined['raw_er']/combined['platform_med_er']
-combined['label']    = (combined['norm_er'] > 1.0).astype(int)
+# Label: direct_label rows use their label, others use norm_er > 1.0
+combined['label'] = (combined['norm_er'] > 1.0).astype(int)
+combined.loc[direct_mask, 'label'] = combined.loc[direct_mask, '_direct_label'].astype(int)
 print(f"Label balance: HIGH={combined['label'].mean()*100:.1f}%")
 
 # ── STEP 3: STRATIFIED SAMPLING ───────────────────────────────────────────────
@@ -757,13 +841,22 @@ print(f"  AUC: {cal_auc:.4f}  (vs raw: {auc:.4f})")
 print(f"  Gap: {cal_gap:.3f}  (vs raw: {gap:.3f})")
 
 # ── STEP 8: SAVE ──────────────────────────────────────────────────────────────
-print(f"\nSaving v5 artifacts...")
-joblib.dump(model_full,   f'{SAVED}/previral_lgbm_v5.joblib')
-joblib.dump(calibrated,   f'{SAVED}/previral_lgbm_v5_cal.joblib')
-joblib.dump(feature_cols, f'{SAVED}/feature_columns_v5.joblib')
-print(f"  previral_lgbm_v5.joblib:     {os.path.getsize(SAVED+'/previral_lgbm_v5.joblib')//1024}KB")
-print(f"  previral_lgbm_v5_cal.joblib: {os.path.getsize(SAVED+'/previral_lgbm_v5_cal.joblib')//1024}KB")
-print(f"  feature_columns_v5.joblib:   {os.path.getsize(SAVED+'/feature_columns_v5.joblib')} bytes")
+print(f"\nSaving v6 artifacts...")
+joblib.dump(model_full,   f'{SAVED}/previral_lgbm_v6.joblib')
+joblib.dump(calibrated,   f'{SAVED}/previral_lgbm_v6_cal.joblib')
+joblib.dump(feature_cols, f'{SAVED}/feature_columns_v6.joblib')
+print(f"  previral_lgbm_v6.joblib:     {os.path.getsize(SAVED+'/previral_lgbm_v6.joblib')//1024}KB")
+print(f"  previral_lgbm_v6_cal.joblib: {os.path.getsize(SAVED+'/previral_lgbm_v6_cal.joblib')//1024}KB")
+print(f"  feature_columns_v6.joblib:   {os.path.getsize(SAVED+'/feature_columns_v6.joblib')} bytes")
+
+print(f"\n{'='*65}")
+print(f"FINAL v6:      F1={f1:.4f}  AUC={auc:.4f}  Gap={gap:.3f}")
+print(f"CALIBRATED v6: F1={cal_f1:.4f}  AUC={cal_auc:.4f}  Gap={cal_gap:.3f}")
+print(f"Instagram training rows: {(train_df['platform']=='instagram').sum():,} (was 1,406 in v5)")
+print(f"Facebook  training rows: {(train_df['platform']=='facebook').sum():,}  (was 984 in v5)")
+print(f"LinkedIn  training rows: {(train_df['platform']=='linkedin').sum():,}  (was 502 in v5)")
+print(f"{'='*65}")
+
 
 print(f"\n{'='*65}")
 print(f"FINAL v5: F1={f1:.4f}  AUC={auc:.4f}  Gap={gap:.3f}")
