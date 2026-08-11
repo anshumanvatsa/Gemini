@@ -1,11 +1,11 @@
 """
 NLP Engine — PreViral
 Runs VADER + RoBERTa + Clickbait Scorer + CTA Detector on caption text.
-Returns 6 features: sentiment_score, emotional_valence, emotional_arousal,
-clickbait_score, cta_present, readability_grade
+Returns 16 features aligned with v3 LightGBM training features.
+Top model predictors: text_length, caps_ratio, unique_word_ratio,
+                      readability_grade, sentiment_score, avg_word_length.
 """
 import re
-import math
 from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 
 # Lazy-load heavy models so the API starts fast
@@ -22,8 +22,6 @@ def _get_roberta():
                 return_all_scores=True
             )
         except Exception as e:
-            # Graceful fallback — RoBERTa requires PyTorch >= 2.6 with safetensors.
-            # VADER provides the fallback sentiment scores in analyze_caption().
             print(f"[NLP Engine] RoBERTa unavailable (will use VADER fallback): {type(e).__name__}")
             _roberta_pipeline = "UNAVAILABLE"
     return _roberta_pipeline if _roberta_pipeline != "UNAVAILABLE" else None
@@ -57,34 +55,27 @@ def _flesch_kincaid_grade(text: str) -> float:
     if not words:
         return 0.0
     syllables = sum(_count_syllables(w) for w in words)
-    words_per_sentence = len(words) / sentences
-    syllables_per_word = syllables / len(words)
-    grade = 0.39 * words_per_sentence + 11.8 * syllables_per_word - 15.59
+    grade = 0.39 * (len(words)/sentences) + 11.8 * (syllables/len(words)) - 15.59
     return round(max(0, min(grade, 18)), 2)
 
 def _count_syllables(word: str) -> int:
     word = word.lower()
-    count = 0
-    vowels = "aeiouy"
-    prev_vowel = False
+    count, prev_vowel = 0, False
     for char in word:
-        is_vowel = char in vowels
-        if is_vowel and not prev_vowel:
+        is_v = char in "aeiouy"
+        if is_v and not prev_vowel:
             count += 1
-        prev_vowel = is_vowel
+        prev_vowel = is_v
     if word.endswith("e") and count > 1:
         count -= 1
     return max(1, count)
 
 # ── Clickbait Score ───────────────────────────────────────────────────────────
 def _clickbait_score(text: str) -> float:
-    text_lower = text.lower()
-    hits = sum(1 for trigger in CLICKBAIT_TRIGGERS if trigger in text_lower)
-    # Also check for excessive punctuation / ALL CAPS words
-    caps_words = len(re.findall(r'\b[A-Z]{3,}\b', text))
-    exclamations = text.count('!')
-    questions = text.count('?')
-    raw = hits * 0.15 + caps_words * 0.1 + exclamations * 0.05 + questions * 0.03
+    tl = text.lower()
+    hits = sum(1 for t in CLICKBAIT_TRIGGERS if t in tl)
+    caps = len(re.findall(r'\b[A-Z]{3,}\b', text))
+    raw = hits * 0.15 + caps * 0.1 + text.count('!') * 0.05 + text.count('?') * 0.03
     return round(min(raw, 1.0), 3)
 
 # ── CTA Detector ─────────────────────────────────────────────────────────────
@@ -94,72 +85,95 @@ def _cta_present(text: str) -> int:
 # ── Main Engine ───────────────────────────────────────────────────────────────
 def analyze_caption(caption: str) -> dict:
     """
-    Main NLP analysis function. Returns the 6-feature dict.
+    Returns 16-feature dict aligned with v3 LightGBM training.
+    All features are in [0, 1] range or small positive floats.
     """
+    EMPTY = {
+        "sentiment_score": 0.0, "emotional_valence": 0.0,
+        "emotional_arousal": 0.0, "clickbait_score": 0.0,
+        "cta_present": 0, "readability_grade": 0.5,
+        "text_length": 0.0, "has_url": 0.0,
+        "question_count": 0.0, "exclamation_count": 0.0,
+        "emoji_count": 0.0, "hashtag_count_nlp": 0.0,
+        "mention_count": 0.0, "caps_ratio": 0.0,
+        "avg_word_length": 0.5, "unique_word_ratio": 0.5,
+    }
     if not caption or len(caption.strip()) < 3:
-        return {
-            "sentiment_score": 0.0,
-            "emotional_valence": 0.0,
-            "emotional_arousal": 0.0,
-            "clickbait_score": 0.0,
-            "cta_present": 0,
-            "readability_grade": 0.0
-        }
+        return EMPTY
 
-    # 1. VADER Sentiment (fast, runs locally, no GPU needed)
+    # ── Structural stats (no models needed) ──────────────────────────────────
+    words = caption.split()
+    alpha = [c for c in caption if c.isalpha()]
+    caps  = [c for c in alpha if c.isupper()]
+
+    tags     = re.findall(r'#\w+', caption)
+    mentions = re.findall(r'@\w+', caption)
+    emojis   = re.findall(r'[^\w\s,.\-!?#@\'"()\[\]{}:;/\\]', caption)
+    has_url  = float(bool(re.search(r'https?://', caption)))
+
+    avg_wl          = sum(len(w) for w in words) / max(len(words), 1)
+    caps_ratio      = len(caps) / max(len(alpha), 1)
+    unique_wr       = len(set(w.lower() for w in words)) / max(len(words), 1)
+
+    # Readability: lower FK grade = more readable = closer to 1.0
+    fk = _flesch_kincaid_grade(caption)
+    readability_norm = max(0.0, 1.0 - fk / 18.0)
+
+    # ── VADER Sentiment ───────────────────────────────────────────────────────
     vader = SentimentIntensityAnalyzer()
-    vader_scores = vader.polarity_scores(caption)
-    sentiment_score = round(vader_scores['compound'], 4)
+    vs = vader.polarity_scores(caption)
+    sentiment_score = round(vs['compound'], 4)
 
-    # 2. RoBERTa Emotional Valence + Arousal (heavy model, lazy-loaded)
-    emotional_valence = 0.0
-    emotional_arousal = 0.0
+    # ── RoBERTa Valence + Arousal ─────────────────────────────────────────────
+    emotional_valence = sentiment_score          # fallback
+    emotional_arousal = abs(sentiment_score)     # fallback
     try:
         roberta = _get_roberta()
-        # Truncate to 512 tokens for RoBERTa
-        trunc_caption = caption[:512]
-        results = roberta(trunc_caption)[0]
-        scores = {r['label']: r['score'] for r in results}
-        # Map label names (model uses LABEL_0=neg, LABEL_1=neu, LABEL_2=pos)
-        pos = scores.get('LABEL_2', scores.get('positive', 0))
-        neg = scores.get('LABEL_0', scores.get('negative', 0))
-        neu = scores.get('LABEL_1', scores.get('neutral', 0))
-        # Valence: -1 (very negative) to +1 (very positive)
-        emotional_valence = round(pos - neg, 4)
-        # Arousal: how extreme is the emotion (not neutral)
-        emotional_arousal = round(1.0 - neu, 4)
+        if roberta:
+            results = roberta(caption[:512])[0]
+            scores  = {r['label']: r['score'] for r in results}
+            pos = scores.get('LABEL_2', scores.get('positive', 0))
+            neg = scores.get('LABEL_0', scores.get('negative', 0))
+            neu = scores.get('LABEL_1', scores.get('neutral',  0))
+            emotional_valence = round(pos - neg, 4)
+            emotional_arousal = round(1.0 - neu, 4)
     except Exception:
-        # Graceful fallback if model not downloaded yet
-        emotional_valence = sentiment_score
-        emotional_arousal = abs(sentiment_score)
-
-    # 3. Clickbait Score
-    clickbait = _clickbait_score(caption)
-
-    # 4. CTA Present
-    cta = _cta_present(caption)
-
-    # 5. Readability Grade
-    readability = _flesch_kincaid_grade(caption)
+        pass
 
     return {
-        "sentiment_score": sentiment_score,
-        "emotional_valence": emotional_valence,
-        "emotional_arousal": emotional_arousal,
-        "clickbait_score": clickbait,
-        "cta_present": cta,
-        "readability_grade": readability
+        # Sentiment (3)
+        "sentiment_score":    sentiment_score,
+        "emotional_valence":  round(max(0.0, emotional_valence), 4),
+        "emotional_arousal":  round(emotional_arousal, 4),
+        # Intent (2)
+        "clickbait_score":    _clickbait_score(caption),
+        "cta_present":        _cta_present(caption),
+        # Readability (1)
+        "readability_grade":  round(readability_norm, 4),
+        # Text stats — v3 top features (6)
+        "text_length":        round(min(len(caption), 3000) / 3000, 4),
+        "caps_ratio":         round(min(caps_ratio, 0.5) / 0.5, 4),
+        "unique_word_ratio":  round(min(unique_wr, 1.0), 4),
+        "avg_word_length":    round(min(avg_wl, 12) / 12, 4),
+        "question_count":     round(min(caption.count('?'), 5) / 5, 4),
+        "exclamation_count":  round(min(caption.count('!'), 5) / 5, 4),
+        # Social signals (4)
+        "has_url":            has_url,
+        "emoji_count":        round(min(len(emojis), 15) / 15, 4),
+        "hashtag_count_nlp":  float(min(len(tags), 30)),
+        "mention_count":      round(min(len(mentions), 10) / 10, 4),
     }
 
 
 if __name__ == "__main__":
-    test_captions = [
-        "You WON'T believe what happened at this restaurant!! Tag a friend who needs to see this! Link in bio!",
-        "Our quarterly earnings report is now available for download.",
+    tests = [
+        "You WON'T believe what happened!! Tag a friend! Link in bio! #viral #food",
+        "Our quarterly earnings report is now available for download. Metrics improved.",
         "Just another day. Nothing special.",
+        "HUGE SALE TODAY ONLY!! Don't miss out!! Fire emoji #sale #fashion",
     ]
-    for cap in test_captions:
-        print(f"\nCaption: {cap[:60]}...")
-        result = analyze_caption(cap)
-        for k, v in result.items():
-            print(f"  {k}: {v}")
+    for cap in tests:
+        print(f"\n{cap[:70]}")
+        r = analyze_caption(cap)
+        for k, v in r.items():
+            print(f"  {k:25s} {v}")

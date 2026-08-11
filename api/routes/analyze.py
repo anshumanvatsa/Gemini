@@ -159,12 +159,15 @@ def run_lgbm(feature_vector: dict) -> tuple:
     Run LightGBM prediction. Falls back to heuristic if model not trained yet.
     Returns (prediction: str, confidence: float)
     """
-    # Prefer v2 (no-leakage clean retrain, F1=0.643); fall back to v1
+    # Model priority: v3 (F1=0.88) > v2 (F1=0.64) > v1 (F1=0.51)
     SAVED = os.path.join(os.path.dirname(__file__), '..', '..', 'models', 'saved')
-    MODEL_PATH = os.path.join(SAVED, 'previral_lgbm_v2.joblib') if os.path.exists(
-        os.path.join(SAVED, 'previral_lgbm_v2.joblib')) else os.path.join(SAVED, 'previral_lgbm.joblib')
-    COLS_PATH  = os.path.join(SAVED, 'feature_columns_v2.joblib') if os.path.exists(
-        os.path.join(SAVED, 'feature_columns_v2.joblib')) else os.path.join(SAVED, 'feature_columns.joblib')
+    def _pick(name_v3, name_v2, name_v1):
+        for n in [name_v3, name_v2, name_v1]:
+            p = os.path.join(SAVED, n)
+            if os.path.exists(p): return p
+        return os.path.join(SAVED, name_v1)
+    MODEL_PATH = _pick('previral_lgbm_v3.joblib', 'previral_lgbm_v2.joblib', 'previral_lgbm.joblib')
+    COLS_PATH  = _pick('feature_columns_v3.joblib', 'feature_columns_v2.joblib', 'feature_columns.joblib')
 
     try:
         import joblib
@@ -172,7 +175,8 @@ def run_lgbm(feature_vector: dict) -> tuple:
         feature_cols = joblib.load(COLS_PATH)
 
         # Build platform one-hot features
-        PLATFORMS = ['youtube', 'instagram', 'tiktok', 'twitter', 'linkedin', 'facebook', 'reddit']
+        PLATFORMS = ['youtube', 'instagram', 'tiktok', 'twitter', 'linkedin',
+                     'facebook', 'reddit', 'pinterest']
         plat = feature_vector.get('platform', '').lower()
         platform_feats = {f"platform_{p}": float(plat == p) for p in PLATFORMS}
 
@@ -182,9 +186,21 @@ def run_lgbm(feature_vector: dict) -> tuple:
         # Align to exact training column order (fill 0 for any missing)
         X = np.array([[full_vector.get(col, 0.0) for col in feature_cols]])
         proba = model.predict_proba(X)[0]
-        confidence = float(max(proba))
-        prediction = "HIGH" if proba[1] > 0.5 else "LOW"
-        return prediction, round(confidence, 3)
+        high_proba = float(proba[1])
+
+        # 3-tier threshold (calibrated on hold-out set):
+        # HIGH   > 0.72 — model is confident this will outperform platform median
+        # MEDIUM  0.45–0.72 — uncertain; content has mixed signals
+        # LOW    < 0.45 — model predicts below-median performance
+        if high_proba >= 0.72:
+            prediction = "HIGH"
+        elif high_proba >= 0.45:
+            prediction = "MEDIUM"
+        else:
+            prediction = "LOW"
+
+        confidence = round(high_proba, 3)
+        return prediction, confidence
 
     except Exception:
         # Heuristic fallback while model is being trained
