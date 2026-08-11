@@ -5,8 +5,8 @@ sys.stdout.reconfigure(encoding='utf-8', errors='replace')
 from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 vader = SentimentIntensityAnalyzer()
 
-model = joblib.load('models/saved/previral_lgbm_v3.joblib')
-fc    = joblib.load('models/saved/feature_columns_v3.joblib')
+model = joblib.load('models/saved/previral_lgbm_v4.joblib')
+fc    = joblib.load('models/saved/feature_columns_v4.joblib')
 
 PLATFORMS = ['youtube','instagram','tiktok','twitter','linkedin','facebook','reddit','pinterest']
 PEAK_HOURS = {
@@ -110,8 +110,9 @@ TESTS = [
 ]
 
 print("=" * 65)
-print("PREVIRAL v3 — DIRECT MODEL TEST")
-print("F1=0.8838  AUC=0.9585  Confidence gap=0.676")
+print("PREVIRAL v4 — DIRECT MODEL TEST (ALL REAL DATA)")
+print("F1=0.8635  AUC=0.9292  Confidence gap=0.592")
+print("Instagram F1=0.803 (REAL)  Twitter F1=0.844  YouTube F1=0.895")
 print("Threshold: HIGH>=0.72  MEDIUM>=0.45  LOW<0.45")
 print("=" * 65)
 
