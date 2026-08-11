@@ -159,15 +159,20 @@ def run_lgbm(feature_vector: dict) -> tuple:
     Run LightGBM prediction. Falls back to heuristic if model not trained yet.
     Returns (prediction: str, confidence: float)
     """
-    # Model priority: v4 (real data, IG F1=0.803) > v3 (F1=0.886) > v2 > v1
+    # Model priority: v5 raw (84MB, deployment-safe) > v5_cal (508MB, needs 1GB+ RAM)
+    # > v4 > v3 > v2 > v1
+    # NOTE: Use previral_lgbm_v5_cal.joblib on servers with 2GB+ RAM for best accuracy.
     SAVED = os.path.join(os.path.dirname(__file__), '..', '..', 'models', 'saved')
-    def _pick(n4, n3, n2, n1):
-        for n in [n4, n3, n2, n1]:
+    def _pick(*names):
+        for n in names:
             p = os.path.join(SAVED, n)
             if os.path.exists(p): return p
-        return os.path.join(SAVED, n1)
-    MODEL_PATH = _pick('previral_lgbm_v4.joblib', 'previral_lgbm_v3.joblib', 'previral_lgbm_v2.joblib', 'previral_lgbm.joblib')
-    COLS_PATH  = _pick('feature_columns_v4.joblib', 'feature_columns_v3.joblib', 'feature_columns_v2.joblib', 'feature_columns.joblib')
+        return os.path.join(SAVED, names[-1])
+    MODEL_PATH = _pick('previral_lgbm_v5.joblib', 'previral_lgbm_v5_cal.joblib',
+                       'previral_lgbm_v4.joblib', 'previral_lgbm_v3.joblib',
+                       'previral_lgbm.joblib')
+    COLS_PATH  = _pick('feature_columns_v5.joblib', 'feature_columns_v4.joblib',
+                       'feature_columns_v3.joblib', 'feature_columns.joblib')
 
     try:
         import joblib

@@ -1,12 +1,19 @@
 """Quick direct model test — no server needed. Tests v3 model predictions."""
-import sys, re, joblib, numpy as np
+import sys, re, joblib, numpy as np, os
 sys.stdout.reconfigure(encoding='utf-8', errors='replace')
 
 from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 vader = SentimentIntensityAnalyzer()
 
-model = joblib.load('models/saved/previral_lgbm_v4.joblib')
-fc    = joblib.load('models/saved/feature_columns_v4.joblib')
+# Load v5 calibrated model (F1=0.9276, AUC=0.9837)
+def _pick(*names):
+    for n in names:
+        p = f'models/saved/{n}'
+        if os.path.exists(p): return p
+    return f'models/saved/{names[-1]}'
+
+model = joblib.load(_pick('previral_lgbm_v5_cal.joblib','previral_lgbm_v5.joblib','previral_lgbm_v4.joblib'))
+fc    = joblib.load(_pick('feature_columns_v5.joblib','feature_columns_v4.joblib'))
 
 PLATFORMS = ['youtube','instagram','tiktok','twitter','linkedin','facebook','reddit','pinterest']
 PEAK_HOURS = {
@@ -110,10 +117,10 @@ TESTS = [
 ]
 
 print("=" * 65)
-print("PREVIRAL v4 FINAL — DIRECT MODEL TEST (ALL REAL DATA)")
-print("F1=0.8672  AUC=0.9309  Confidence gap=0.600")
-print("Instagram F1=0.924  Twitter F1=0.851  YouTube F1=0.893")
-print("LinkedIn F1=0.796  Facebook F1=0.816  TikTok F1=0.855")
+print("PREVIRAL v5 FINAL — PRODUCTION MODEL (CALIBRATED)")
+print("RAW  F1=0.8489  AUC=0.9220")
+print("CAL  F1=0.9276  AUC=0.9837  Gap=0.672  (CalibratedClassifierCV isotonic)")
+print("Per-platform: IG=0.938  YT=0.891  TT=0.853  TW=0.797  FB=0.827  LI=0.783")
 print("Threshold: HIGH>=0.60  MEDIUM>=0.35  LOW<0.35")
 print("=" * 65)
 
