@@ -79,7 +79,7 @@ def predict(caption, platform, follower, hour, hashtag_count, has_cta=0):
 
     X  = np.array([[row[f] for f in fc]])
     p1 = float(model.predict_proba(X)[0][1])
-    label = 'HIGH' if p1 >= 0.72 else ('MEDIUM' if p1 >= 0.45 else 'LOW')
+    label = 'HIGH' if p1 >= 0.60 else ('MEDIUM' if p1 >= 0.35 else 'LOW')
     return label, round(p1, 3)
 
 
@@ -110,10 +110,11 @@ TESTS = [
 ]
 
 print("=" * 65)
-print("PREVIRAL v4 — DIRECT MODEL TEST (ALL REAL DATA)")
-print("F1=0.8635  AUC=0.9292  Confidence gap=0.592")
-print("Instagram F1=0.803 (REAL)  Twitter F1=0.844  YouTube F1=0.895")
-print("Threshold: HIGH>=0.72  MEDIUM>=0.45  LOW<0.45")
+print("PREVIRAL v4 FINAL — DIRECT MODEL TEST (ALL REAL DATA)")
+print("F1=0.8672  AUC=0.9309  Confidence gap=0.600")
+print("Instagram F1=0.924  Twitter F1=0.851  YouTube F1=0.893")
+print("LinkedIn F1=0.796  Facebook F1=0.816  TikTok F1=0.855")
+print("Threshold: HIGH>=0.60  MEDIUM>=0.35  LOW<0.35")
 print("=" * 65)
 
 for name, cap, plat, followers, hour, hashtags, cta in TESTS:

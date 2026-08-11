@@ -188,13 +188,13 @@ def run_lgbm(feature_vector: dict) -> tuple:
         proba = model.predict_proba(X)[0]
         high_proba = float(proba[1])
 
-        # 3-tier threshold (calibrated on hold-out set):
-        # HIGH   > 0.72 — model is confident this will outperform platform median
-        # MEDIUM  0.45–0.72 — uncertain; content has mixed signals
-        # LOW    < 0.45 — model predicts below-median performance
-        if high_proba >= 0.72:
+        # 3-tier threshold calibrated on v4 validation (gap=0.600):
+        # HIGH   > 0.60 — confident above-median performance
+        # MEDIUM  0.35–0.60 — uncertain; worth optimizing before posting
+        # LOW    < 0.35 — predicted below-median performance
+        if high_proba >= 0.60:
             prediction = "HIGH"
-        elif high_proba >= 0.45:
+        elif high_proba >= 0.35:
             prediction = "MEDIUM"
         else:
             prediction = "LOW"
