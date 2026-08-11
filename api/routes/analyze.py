@@ -159,8 +159,12 @@ def run_lgbm(feature_vector: dict) -> tuple:
     Run LightGBM prediction. Falls back to heuristic if model not trained yet.
     Returns (prediction: str, confidence: float)
     """
-    MODEL_PATH = os.path.join(os.path.dirname(__file__), '..', '..', 'models', 'saved', 'previral_lgbm.joblib')
-    COLS_PATH  = os.path.join(os.path.dirname(__file__), '..', '..', 'models', 'saved', 'feature_columns.joblib')
+    # Prefer v2 (no-leakage clean retrain, F1=0.643); fall back to v1
+    SAVED = os.path.join(os.path.dirname(__file__), '..', '..', 'models', 'saved')
+    MODEL_PATH = os.path.join(SAVED, 'previral_lgbm_v2.joblib') if os.path.exists(
+        os.path.join(SAVED, 'previral_lgbm_v2.joblib')) else os.path.join(SAVED, 'previral_lgbm.joblib')
+    COLS_PATH  = os.path.join(SAVED, 'feature_columns_v2.joblib') if os.path.exists(
+        os.path.join(SAVED, 'feature_columns_v2.joblib')) else os.path.join(SAVED, 'feature_columns.joblib')
 
     try:
         import joblib
