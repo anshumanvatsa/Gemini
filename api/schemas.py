@@ -75,6 +75,9 @@ class AnalyzeResponse(BaseModel):
     platform: str
     processing_time_ms: float
 
+    # Real-time Trend Intelligence (Gemini Search Grounding)
+    trending_hashtags: Optional[Dict[str, Any]] = None
+
 
 class HashtagQueryRequest(BaseModel):
     query: str

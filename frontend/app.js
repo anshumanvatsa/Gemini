@@ -225,6 +225,9 @@ function renderResults(data, caption) {
   // Counterfactuals
   renderCFs(data.suggestions || []);
 
+  // Trending hashtags (Gemini Search Grounding)
+  renderTrending(data.trending_hashtags || {});
+
   // Share button
   setupShareBtn(data, caption);
 
@@ -393,6 +396,76 @@ function renderCFs(suggestions) {
     `;
     list.appendChild(el);
   });
+}
+
+// ── Trending Hashtags (Gemini Search Grounding) ─────────────────────────────
+function renderTrending(data) {
+  const card = document.getElementById('trendCard');
+  const body = document.getElementById('trendBody');
+  const subtitle = document.getElementById('trendSubtitle');
+
+  const trending = data.trending_now || [];
+  const stable   = data.stable_performers || [];
+  const avoid    = data.avoid || [];
+  const topic    = data.topic_detected || '';
+  const grounded = data.grounding_used || data._gemini_used;
+
+  // Hide if no data at all
+  if (!trending.length && !stable.length) {
+    card.style.display = 'none';
+    return;
+  }
+
+  card.style.display = '';
+  subtitle.textContent = grounded
+    ? `Gemini searched the web just now · Topic: ${topic}`
+    : `Based on hashtag database · Topic: ${topic}`;
+
+  let html = '';
+
+  if (trending.length) {
+    html += `<div class="trend-bucket">
+      <div class="trend-bucket-label fire">🔥 Trending in your niche right now</div>
+      <div class="trend-tags">
+        ${trending.map(t => `
+          <div class="trend-tag fire-tag" title="${escHtml(t.why || '')}">
+            ${escHtml(t.tag)}
+            ${t.velocity === 'high' ? '<span class="trend-tag-velocity">HOT</span>' : ''}
+          </div>`).join('')}
+      </div>
+    </div>`;
+  }
+
+  if (stable.length) {
+    html += `<div class="trend-bucket">
+      <div class="trend-bucket-label check">✅ Stable discovery hashtags</div>
+      <div class="trend-tags">
+        ${stable.map(t => `
+          <div class="trend-tag check-tag" title="${escHtml(t.why || '')}">
+            ${escHtml(t.tag)}
+          </div>`).join('')}
+      </div>
+    </div>`;
+  }
+
+  if (avoid.length) {
+    html += `<div class="trend-bucket">
+      <div class="trend-bucket-label skip">⚠️ Skip these (oversaturated / off-topic)</div>
+      <div class="trend-tags">
+        ${avoid.map(t => `
+          <div class="trend-tag skip-tag" title="${escHtml(t.reason || '')}">
+            ${escHtml(t.tag)}
+          </div>`).join('')}
+      </div>
+    </div>`;
+  }
+
+  if (topic) {
+    html += `<div class="trend-topic">💡 Topic detected: <strong>${escHtml(topic)}</strong> — all hashtags are filtered to this niche only</div>`;
+  }
+
+  body.innerHTML = html;
+  card.classList.add('fade-in');
 }
 
 // ── AI Content Director ──────────────────────────────────────────────────

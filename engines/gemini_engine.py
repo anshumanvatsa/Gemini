@@ -282,5 +282,103 @@ def health_check() -> dict:
             "sdk": "google-genai (new)",
             "response": r.text.strip(),
         }
-    except Exception as e:
         return {"gemini_available": False, "error": str(e)[:120], "sdk": "google-genai (new)"}
+
+
+# ── Real-Time Trend Intelligence (Google Search Grounding) ────────────────────
+TREND_PROMPT = """You are a social media trend analyst with real-time Google Search access.
+
+Platform: {platform}
+Niche: {niche}
+Caption topic: {topic}
+
+Using Google Search, find what hashtags are ACTUALLY trending RIGHT NOW on {platform} 
+that are relevant to this specific topic and niche.
+
+Rules:
+1. ONLY suggest hashtags relevant to the topic "{topic}" — never suggest off-topic viral tags
+2. Separate genuinely trending (high velocity this week) from stable evergreen ones
+3. Flag oversaturated tags (>100M posts) that hurt discoverability
+4. Give 5 trending, 5 stable, 3 to avoid
+
+Return ONLY valid JSON:
+{{
+  "trending_now": [
+    {{"tag": "#example", "why": "Brief reason it's trending", "velocity": "high/medium"}}
+  ],
+  "stable_performers": [
+    {{"tag": "#example", "why": "Consistent discovery value"}}
+  ],
+  "avoid": [
+    {{"tag": "#example", "reason": "Too saturated / off-topic"}}
+  ],
+  "topic_detected": "<what topic you identified from the caption>",
+  "grounding_used": true
+}}"""
+
+
+def suggest_trending_hashtags(
+    caption: str,
+    platform: str = "instagram",
+    niche: str = "general",
+) -> dict:
+    """
+    Real-time trending hashtag suggestions using Gemini Google Search grounding.
+    Runs in parallel with LightGBM prediction — adds zero sequential latency.
+    Returns topic-relevant hashtags in 3 buckets: trending_now, stable, avoid.
+    """
+    fallback = {
+        "trending_now": [],
+        "stable_performers": [
+            {"tag": f"#{niche}", "why": "Core niche tag"},
+            {"tag": f"#{platform}creator", "why": "Platform creator community"},
+        ],
+        "avoid": [],
+        "topic_detected": niche,
+        "grounding_used": False,
+        "_gemini_used": False,
+    }
+
+    client = _get_client()
+    if client is None:
+        return fallback
+
+    # Extract topic: first 200 chars of caption gives enough context
+    topic_hint = caption[:200].strip()
+
+    prompt = TREND_PROMPT.format(
+        platform=platform,
+        niche=niche,
+        topic=topic_hint,
+    )
+
+    try:
+        t0 = time.time()
+        response = client.models.generate_content(
+            model=MODEL_NAME,
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                tools=[types.Tool(google_search=types.GoogleSearch())],
+                temperature=0.2,
+                max_output_tokens=800,
+            )
+        )
+        elapsed_ms = int((time.time() - t0) * 1000)
+
+        # Gemini with grounding may wrap JSON in text — extract it
+        raw = response.text or ""
+        # Find JSON block
+        json_match = re.search(r'\{[\s\S]*\}', raw)
+        if not json_match:
+            fallback["_error"] = "No JSON in grounding response"
+            return fallback
+
+        data = json.loads(json_match.group(0))
+        data["_gemini_used"] = True
+        data["_latency_ms"] = elapsed_ms
+        return data
+
+    except Exception as e:
+        fallback["_error"] = str(e)[:120]
+        fallback["_gemini_used"] = False
+        return fallback

@@ -23,10 +23,11 @@ from engines.vision_engine import analyze_image, no_image_defaults
 from counterfactual.dice_engine import generate_suggestions
 from api.routes.media import get_cached_vision
 try:
-    from engines.gemini_engine import extract_features as gemini_features, ai_content_director
+    from engines.gemini_engine import extract_features as gemini_features, ai_content_director, suggest_trending_hashtags
     GEMINI_ENGINE_AVAILABLE = True
 except ImportError:
     GEMINI_ENGINE_AVAILABLE = False
+    def suggest_trending_hashtags(*a, **kw): return {"trending_now": [], "stable_performers": [], "avoid": [], "grounding_used": False}
 
 router = APIRouter()
 
@@ -269,13 +270,16 @@ async def analyze_post(
     timing_task  = loop.run_in_executor(None, analyze_timing, platform, dt)
     hashtag_task = loop.run_in_executor(None, score_hashtags, hashtags, platform, caption)
 
-    # Gemini multimodal task — runs async so latency is hidden behind LightGBM
+    # Gemini multimodal NLP task — runs async so latency is hidden behind LightGBM
     if GEMINI_ENGINE_AVAILABLE:
         gemini_task = loop.run_in_executor(None, gemini_features, caption, platform, image_bytes)
     else:
         async def _no_gemini():
             return {}
         gemini_task = _no_gemini()
+
+    # Gemini Search Grounding trend task — fully parallel, zero sequential cost
+    trend_task = loop.run_in_executor(None, suggest_trending_hashtags, caption, platform, niche or "general")
 
     if cached_vision:
         async def _cached_vision_task():
@@ -288,8 +292,8 @@ async def analyze_post(
             return no_image_defaults()
         vision_task = _no_vision()
 
-    nlp_features, timing_features, hashtag_features, vision_features, gemini_nlp = await asyncio.gather(
-        nlp_task, timing_task, hashtag_task, vision_task, gemini_task
+    nlp_features, timing_features, hashtag_features, vision_features, gemini_nlp, trending_data = await asyncio.gather(
+        nlp_task, timing_task, hashtag_task, vision_task, gemini_task, trend_task
     )
 
     # Merge Gemini features into NLP (Gemini wins on shared keys if available)
@@ -341,6 +345,9 @@ async def analyze_post(
 
     processing_time = (time.time() - start_time) * 1000
 
+    # Strip internal keys from trending data before sending to client
+    clean_trending = {k: v for k, v in trending_data.items() if not k.startswith("_")}
+
     return AnalyzeResponse(
         prediction=prediction,
         confidence=round(confidence, 3),
@@ -354,7 +361,8 @@ async def analyze_post(
         hashtag_suggestions=hashtag_suggestions,
         trajectory=trajectory,
         platform=platform,
-        processing_time_ms=round(processing_time, 1)
+        processing_time_ms=round(processing_time, 1),
+        trending_hashtags=clean_trending
     )
 
 
