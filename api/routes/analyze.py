@@ -469,7 +469,7 @@ async def analyze_post(
     )
 
 
-# ── AI Content Director Endpoint ─────────────────────────────────────────────
+# ── AI Content Director Endpoint ───────────────────────────────────────────────
 @router.post("/ai-director")
 async def ai_director(
     caption: str = Form(...),
@@ -479,42 +479,41 @@ async def ai_director(
     niche: Optional[str] = Form("tech"),
     media: Optional[UploadFile] = File(None)
 ):
-    """
-    AI Content Director — Gemini Pro Vision analyzes caption + thumbnail together.
-    Returns: rewritten caption, visual-caption alignment, 3 specific improvements,
-             thumbnail suggestion, hook rewrite, vocabulary, predicted score lift.
-    This is PreViral's flagship Gemini-native feature for the XPRIZE submission.
-    """
-    start_time = time.time()
-    dt = datetime.now()
 
-    image_bytes = None
-    if media and media.filename:
-        image_bytes = await media.read()
-
-    # Get current prediction score first
     loop = asyncio.get_event_loop()
-    hashtags = extract_hashtags(caption)
-    nlp_task     = loop.run_in_executor(None, analyze_caption, caption)
-    timing_task  = loop.run_in_executor(None, analyze_timing, platform, dt)
-    hashtag_task = loop.run_in_executor(None, score_hashtags, hashtags, platform, caption)
-    nlp_f, timing_f, hashtag_f = await asyncio.gather(nlp_task, timing_task, hashtag_task)
 
-    feature_vector = {
-        **nlp_f, **hashtag_f, **timing_f, **no_image_defaults(),
-        "follower_count": follower_count / 1_000_000,
-        "avg_engagement_rate": avg_engagement_rate
-    }
-    prediction, confidence = run_lgbm(feature_vector)
-
-    # Run Gemini AI Content Director
-    if GEMINI_ENGINE_AVAILABLE:
-        director_result = await loop.run_in_executor(
-            None, ai_content_director,
-            caption, platform, confidence, prediction, image_bytes
+    # ── Helper: score any caption text with LightGBM ──────────────────────────
+    async def _score(cap: str) -> tuple[str, float]:
+        """Return (prediction, confidence) for any caption string."""
+        hashtags = extract_hashtags(cap)
+        nlp_f, timing_f, hashtag_f = await asyncio.gather(
+            loop.run_in_executor(None, analyze_caption, cap),
+            loop.run_in_executor(None, analyze_timing, platform, dt),
+            loop.run_in_executor(None, score_hashtags, hashtags, platform, cap),
         )
-    else:
-        director_result = {
+        fv = {
+            **nlp_f, **hashtag_f, **timing_f, **no_image_defaults(),
+            "follower_count": follower_count / 1_000_000,
+            "avg_engagement_rate": avg_engagement_rate,
+        }
+        return run_lgbm(fv)
+
+    # ── Score the original caption ─────────────────────────────────────────────
+    orig_prediction, orig_confidence = await _score(caption)
+    orig_score_pct = round(orig_confidence * 100)
+
+    iteration_trail = [{"label": "Original", "score": orig_score_pct, "caption": caption}]
+    best_result     = None
+    best_score      = orig_confidence
+    current_caption = caption
+    current_score   = orig_confidence
+
+    if not GEMINI_ENGINE_AVAILABLE:
+        return {
+            "current_prediction": orig_prediction,
+            "current_confidence": round(orig_confidence, 3),
+            "platform": platform,
+            "gemini_used": False,
             "alignment_assessment": "Gemini API not configured. Set GEMINI_API_KEY env var.",
             "rewritten_caption": caption,
             "specific_improvements": [
@@ -522,21 +521,70 @@ async def ai_director(
                 "Include a clear call-to-action (comment, share, follow).",
                 "Use 3-5 niche hashtags your audience follows."
             ],
-            "thumbnail_suggestion": "Add a human face to thumbnail for higher click-through.",
-            "predicted_score_after": round(min(confidence + 0.12, 0.95), 3),
-            "hook_rewrite": caption[:80].strip(),
-            "best_posting_time": "Tuesday-Thursday, 11am-1pm local time",
-            "vocabulary_suggestion": "Use emotionally charged, platform-native language.",
-            "_gemini_used": False
+            "iteration_trail": iteration_trail,
+            "processing_time_ms": round((time.time() - start_time) * 1000, 1),
         }
 
+    # ── 2-iteration model-validated loop ──────────────────────────────────────
+    for iteration in range(1, 3):
+        score_pct = round(current_score * 100)
+
+        # Call Gemini with the NUMERIC score so it knows exactly how far from HIGH
+        result = await loop.run_in_executor(
+            None, ai_content_director,
+            current_caption, platform, current_score, orig_prediction, image_bytes
+        )
+
+        # Extract the rewritten caption from Gemini's output
+        rewritten = (
+            result.get("rewritten_caption")          # fixer mode
+            or current_caption                        # optimizer mode (no full rewrite)
+        )
+
+        # Score the rewrite with LightGBM
+        iter_prediction, iter_confidence = await _score(rewritten)
+        iter_score_pct = round(iter_confidence * 100)
+
+        iteration_trail.append({
+            "label": f"Iteration {iteration}",
+            "score": iter_score_pct,
+            "caption": rewritten,
+            "prediction": iter_prediction,
+        })
+
+        # Track best — keep whichever iteration scores highest
+        if iter_confidence > best_score:
+            best_score  = iter_confidence
+            best_result = result
+            best_result["rewritten_caption"] = rewritten
+            best_result["_iter_best"]        = iteration
+            best_result["_iter_score"]       = iter_score_pct
+
+        # Feed the rewrite into the next iteration
+        current_caption = rewritten
+        current_score   = iter_confidence
+
+        # Early exit if already HIGH — no point iterating further
+        if iter_prediction == "HIGH" and iter_confidence >= 0.75:
+            break
+
+    # Fallback if both iterations scored lower than original
+    if best_result is None:
+        best_result = await loop.run_in_executor(
+            None, ai_content_director,
+            caption, platform, orig_confidence, orig_prediction, image_bytes
+        )
+
     return {
-        "current_prediction": prediction,
-        "current_confidence": round(confidence, 3),
-        "platform": platform,
-        "gemini_used": director_result.get("_gemini_used", False),
-        **{k: v for k, v in director_result.items() if not k.startswith("_")},
-        "processing_time_ms": round((time.time() - start_time) * 1000, 1)
+        "current_prediction":  orig_prediction,
+        "current_confidence":  round(orig_confidence, 3),
+        "platform":            platform,
+        "gemini_used":         best_result.get("_gemini_used", False),
+        "iteration_trail":     iteration_trail,
+        "best_iteration":      best_result.get("_iter_best", 1),
+        "best_score_pct":      best_result.get("_iter_score", orig_score_pct),
+        **{k: v for k, v in best_result.items() if not k.startswith("_")},
+        "processing_time_ms":  round((time.time() - start_time) * 1000, 1),
     }
 
 

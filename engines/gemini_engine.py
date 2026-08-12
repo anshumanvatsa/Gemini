@@ -92,9 +92,10 @@ DIRECTOR_FIXER_PROMPT = """You are PreViral's AI Content Director. This post nee
 
 Platform: {platform}
 Caption: {caption}
-Current Score: {current_score}/1.0 (LOW/MEDIUM — needs improvement)
+LightGBM Score: {score_pct} out of 100 — needs to reach 75+ to be HIGH
 {visual_note}
 
+The score is {score_pct}/100. Your rewrite must specifically address what is keeping it below 75.
 Return ONLY valid JSON (no markdown, keep all string values SHORT — max 120 chars each):
 {{
   "alignment_assessment": "<2 short sentences: main weakness and opportunity>",
@@ -109,20 +110,20 @@ Return ONLY valid JSON (no markdown, keep all string values SHORT — max 120 ch
 }}"""
 
 DIRECTOR_OPTIMIZER_PROMPT = """You are PreViral's AI Content Director running in OPTIMIZER MODE.
-This caption already scores HIGH. Your job is NOT to rewrite it — your job is to find the marginal gains
-that no other AI can see, because you have access to platform algorithm intelligence.
+This caption already scores HIGH. Your job is NOT to rewrite it — find the marginal gains
+that platform algorithm intelligence reveals.
 
 Platform: {platform}
 Caption: {caption}
-Current Confidence: {current_score}/1.0 (HIGH — already strong)
+LightGBM Score: {score_pct} out of 100 (already HIGH — push toward 95+)
 {visual_note}
 
 Deliver what Claude, ChatGPT, and other AIs CANNOT:
-1. A/B hook variants — 3 alternative opening lines to split-test (different angles: curiosity / authority / story)
-2. Micro-improvements — 3 surgical word-level tweaks (not a full rewrite) that push the score higher
-3. Hashtag velocity — which hashtags to ADD (rising fast) and which to REMOVE (dying/oversaturated)
-4. Algorithm timing edge — the specific window on {platform} where THIS content type performs best
-5. Competitive gap — what the top 1% of posts in this niche do that this caption still doesn't
+1. A/B hook variants — 3 alternative opening lines (curiosity / authority / story angles)
+2. Micro-improvements — 3 surgical word-level tweaks (not a full rewrite)
+3. Hashtag velocity — which to ADD (rising) and which to REMOVE (dying/oversaturated)
+4. Algorithm timing edge — exact window on {platform} where THIS content type peaks
+5. Competitive gap — what top 1% posts in this niche do that this caption still lacks
 
 Return ONLY valid JSON (no markdown, keep all string values SHORT — max 150 chars each):
 {{
@@ -137,7 +138,7 @@ Return ONLY valid JSON (no markdown, keep all string values SHORT — max 150 ch
   "hashtags_to_remove": ["#tag1", "#tag2"],
   "timing_edge": "<exact day + hour + why this content type peaks then on {platform}>",
   "competitive_gap": "<the one thing top 1% posts do that this caption still lacks>",
-  "predicted_score_after": <float 0.0-1.0, the marginal gain from applying these tweaks>,
+  "predicted_score_after": <float 0.0-1.0>,
   "vocabulary_suggestion": "<3-4 words currently trending in this niche on {platform}>",
   "mode": "optimizer"
 }}"""
@@ -276,6 +277,7 @@ def ai_content_director(
     """
     client = _get_client()
     is_high = current_score >= 0.60 or tier == "HIGH"
+    score_pct = round(current_score * 100)
 
     fallback = {
         "alignment_assessment": "Add your GEMINI_API_KEY to enable AI Content Director.",
@@ -308,14 +310,14 @@ def ai_content_director(
         prompt = DIRECTOR_OPTIMIZER_PROMPT.format(
             platform=platform,
             caption=caption[:2000],
-            current_score=f"{current_score:.2f}",
+            score_pct=score_pct,
             visual_note=visual_note,
         )
     else:
         prompt = DIRECTOR_FIXER_PROMPT.format(
             platform=platform,
             caption=caption[:2000],
-            current_score=f"{current_score:.2f}",
+            score_pct=score_pct,
             visual_note=visual_note,
         )
 

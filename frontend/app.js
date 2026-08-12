@@ -503,7 +503,7 @@ function renderTenDaySummary(s) {
 // ── AI Content Director ──────────────────────────────────────────────────
 async function triggerAIDirector(caption, platform, confidence, prediction) {
   const body = document.getElementById('directorBody');
-  body.innerHTML = '<div class="director-loading"><div class="gemini-spinner"></div><span>Gemini is analyzing your content...</span></div>';
+  body.innerHTML = '<div class="director-loading"><div class="gemini-spinner"></div><span>Running model-validated loop… Gemini → Score → Refine → Score</span></div>';
 
   const fd = new FormData();
   fd.append('caption', caption);
@@ -529,6 +529,36 @@ function renderDirector(d, originalCaption) {
   const currentConf = d.current_confidence || 0;
   const afterConf   = d.predicted_score_after || Math.min(currentConf + 0.08, 0.98);
   const liftPct     = Math.round((afterConf - currentConf) * 100);
+  const trail       = d.iteration_trail || [];
+  const bestIter    = d.best_iteration || null;
+
+  // ── Iteration Trail ───────────────────────────────────────────────────────
+  let trailHtml = '';
+  if (trail.length > 1) {
+    const bestScore = Math.max(...trail.slice(1).map(t => t.score));
+    trailHtml = `
+    <div class="iter-trail">
+      <div class="iter-trail-label">Model-Validated Score Journey</div>
+      <div class="iter-trail-steps">
+        ${trail.map((t, i) => {
+          const isOrig  = i === 0;
+          const isBest  = !isOrig && t.score === bestScore;
+          const col     = t.score >= 75 ? '#10b981' : t.score >= 45 ? '#f59e0b' : '#ef4444';
+          return `
+          <div class="iter-step ${isBest ? 'iter-best' : ''}">
+            <div class="iter-label">${escHtml(t.label)}</div>
+            <div class="iter-score" style="color:${col}">${t.score}</div>
+            ${isBest ? '<div class="iter-best-badge">BEST</div>' : ''}
+          </div>
+          ${i < trail.length - 1 ? '<div class="iter-arrow">→</div>' : ''}`;
+        }).join('')}
+      </div>
+      ${bestScore > (trail[0]?.score || 0) ?
+        `<div class="iter-summary">+${bestScore - trail[0].score} points gained across ${trail.length - 1} iteration${trail.length > 2 ? 's' : ''}. Best rewrite returned.</div>` :
+        `<div class="iter-summary">Original was already optimal — returning best available rewrite.</div>`
+      }
+    </div>`;
+  }
 
   if (mode === 'optimizer') {
     // ── OPTIMIZER MODE: best → better ────────────────────────────────────────
@@ -539,6 +569,7 @@ function renderDirector(d, originalCaption) {
     const angleColors = { Curiosity: '#6366f1', Authority: '#10b981', Story: '#f59e0b' };
 
     body.innerHTML = `
+      ${trailHtml}
       <div class="optimizer-badge">
         ⚡ Optimizer Mode — Marginal Gains Intelligence
         <span class="optimizer-sub">Your caption is already HIGH. These are the gains Claude can't give you.</span>
@@ -624,6 +655,7 @@ function renderDirector(d, originalCaption) {
     // ── FIXER MODE: low/medium — full rewrite ─────────────────────────────────
     const rewritten = d.rewritten_caption || originalCaption;
     body.innerHTML = `
+      ${trailHtml}
       <div class="caption-compare">
         <div class="caption-box">
           <div class="caption-box-label before">❌ Original</div>
