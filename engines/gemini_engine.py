@@ -282,6 +282,7 @@ def health_check() -> dict:
             "sdk": "google-genai (new)",
             "response": r.text.strip(),
         }
+    except Exception as e:
         return {"gemini_available": False, "error": str(e)[:120], "sdk": "google-genai (new)"}
 
 
