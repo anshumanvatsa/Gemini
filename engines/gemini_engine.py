@@ -2,17 +2,14 @@
 engines/gemini_engine.py
 ─────────────────────────
 Gemini-powered multimodal analysis for PreViral.
-Replaces VADER + RoBERTa + clickbait with a single Gemini Pro Vision call
+Uses the NEW google-genai SDK (google.generativeai is deprecated).
+
+Replaces VADER + RoBERTa + clickbait scorer with a single Gemini call
 that reads caption + thumbnail TOGETHER, the way an audience would.
 
-Outputs a structured JSON with 8 NLP features that feed directly into
-the LightGBM feature vector (same schema as nlp_engine.py).
-
-Also powers the AI Content Director:
-  - Visual-caption alignment score
-  - Rewritten caption (preserves user voice)
-  - Thumbnail composition suggestion
-  - Niche-specific vocabulary recommendation
+Powers two features:
+  1. Enriched NLP features (feeds LightGBM — same schema as nlp_engine.py)
+  2. AI Content Director (flagship Gemini-native hackathon feature)
 """
 
 import os
@@ -20,185 +17,185 @@ import json
 import base64
 import re
 import time
-import hashlib
-from functools import lru_cache
 from typing import Optional
 
+# ── New SDK (google-genai package) ────────────────────────────────────────────
 try:
-    import google.generativeai as genai
+    from google import genai
+    from google.genai import types
     GEMINI_AVAILABLE = True
 except ImportError:
     GEMINI_AVAILABLE = False
 
 # ── Config ────────────────────────────────────────────────────────────────────
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
-MODEL_NAME     = "gemini-2.0-flash"   # fast, cheap, multimodal — perfect for live demo
+# Use gemini-flash-latest — confirmed working on free API keys
+# (gemini-2.5-flash is restricted for new API keys as of Aug 2026)
+MODEL_NAME = os.getenv("GEMINI_MODEL", "gemini-flash-latest")
 
-# ── Schema returned by Gemini (maps 1:1 to nlp_engine feature names) ──────────
+# ── Default features (fallback when Gemini unavailable) ──────────────────────
 DEFAULT_FEATURES = {
-    "sentiment_score":    0.0,    # -1 to 1
-    "emotional_valence":  0.5,    # 0 to 1
-    "emotional_arousal":  0.3,    # 0 to 1
-    "clickbait_score":    0.0,    # 0 to 1
-    "cta_present":        0,      # 0 or 1
-    "readability_grade":  0.5,    # 0 to 1 (normalized)
-    "question_count":     0,      # raw count
-    "exclamation_count":  0,      # raw count
-    "has_url":            0,      # 0 or 1
-    "emoji_count":        0,      # raw count
-    "caps_ratio":         0.0,    # 0 to 1
-    "avg_word_length":    5.0,    # chars
-    "unique_word_ratio":  0.7,    # 0 to 1
-    "text_length":        100,    # chars
-    "hashtag_count_nlp":  0,      # from text
-    "mention_count":      0,      # from text
+    "sentiment_score":    0.0,
+    "emotional_valence":  0.5,
+    "emotional_arousal":  0.3,
+    "clickbait_score":    0.0,
+    "cta_present":        0,
+    "readability_grade":  0.5,
+    "question_count":     0,
+    "exclamation_count":  0,
+    "has_url":            0,
+    "emoji_count":        0,
+    "caps_ratio":         0.0,
+    "avg_word_length":    5.0,
+    "unique_word_ratio":  0.7,
+    "text_length":        100,
+    "hashtag_count_nlp":  0,
+    "mention_count":      0,
 }
 
-ANALYSIS_PROMPT = """You are an expert social media analyst. Analyze the following social media post caption (and thumbnail image if provided).
-
-Your task: return a JSON object with these exact keys and value ranges. Be precise — these values feed a machine learning model.
-
-Caption:
-{caption}
+ANALYSIS_PROMPT = """You are an expert social media analyst. Analyze this social media caption (and thumbnail if provided).
 
 Platform: {platform}
+Caption: {caption}
 
-Return ONLY valid JSON (no markdown, no explanation), with these keys:
+Return ONLY valid JSON (no markdown, no explanation):
 {{
   "sentiment_score": <float -1.0 to 1.0, overall emotional tone>,
   "emotional_valence": <float 0.0 to 1.0, positivity strength>,
-  "emotional_arousal": <float 0.0 to 1.0, excitement/intensity>,
-  "clickbait_score": <float 0.0 to 1.0, how clickbait-y the hook is>,
-  "cta_present": <0 or 1, has clear call-to-action>,
-  "readability_grade": <float 0.0 to 1.0, 1.0=very easy to read>,
-  "question_count": <int, number of questions>,
-  "exclamation_count": <int, number of exclamation marks>,
+  "emotional_arousal": <float 0.0 to 1.0, excitement intensity>,
+  "clickbait_score": <float 0.0 to 1.0, clickbait level>,
+  "cta_present": <0 or 1, clear call-to-action present>,
+  "readability_grade": <float 0.0 to 1.0, 1.0=very easy>,
+  "question_count": <int>,
+  "exclamation_count": <int>,
   "has_url": <0 or 1>,
   "emoji_count": <int>,
-  "caps_ratio": <float 0.0 to 1.0, proportion of uppercase letters>,
-  "avg_word_length": <float, mean word length in chars>,
+  "caps_ratio": <float 0.0 to 1.0>,
+  "avg_word_length": <float, mean chars per word>,
   "unique_word_ratio": <float 0.0 to 1.0, lexical diversity>,
   "text_length": <int, total characters>,
-  "hashtag_count_nlp": <int, hashtags in caption>,
+  "hashtag_count_nlp": <int, # hashtags in caption>,
   "mention_count": <int, @ mentions>,
-  "hook_strength": <float 0.0 to 1.0, how strong the opening hook is>,
-  "visual_caption_alignment": <float 0.0 to 1.0, how well thumbnail matches caption, 0.5 if no image>,
-  "niche_relevance": <float 0.0 to 1.0, how niche-specific the vocabulary is>,
-  "viral_potential": <float 0.0 to 1.0, your overall assessment of viral potential>
+  "hook_strength": <float 0.0 to 1.0, opening hook quality>,
+  "visual_caption_alignment": <float 0.0 to 1.0, 0.5 if no image provided>,
+  "niche_relevance": <float 0.0 to 1.0, niche-specific vocabulary>,
+  "viral_potential": <float 0.0 to 1.0, your overall viral assessment>
 }}"""
 
-CONTENT_DIRECTOR_PROMPT = """You are PreViral's AI Content Director. A creator wants to maximize their post's engagement.
+DIRECTOR_PROMPT = """You are PreViral's AI Content Director. Help this creator maximize engagement.
 
 Platform: {platform}
 Current Caption: {caption}
-Current Score: {current_score} / 1.0 ({tier} tier)
+Current Score: {current_score}/1.0 ({tier})
+{visual_note}
 
-{visual_instruction}
-
-Analyze their content holistically and return ONLY valid JSON (no markdown):
+Return ONLY valid JSON (no markdown):
 {{
-  "alignment_assessment": "<2 sentences: what's working and what's misaligned between visual and caption>",
-  "rewritten_caption": "<rewritten version that fixes weaknesses while preserving creator's voice — max 280 chars for Twitter, 2200 for Instagram>",
-  "specific_improvements": [
-    "<concrete improvement 1>",
-    "<concrete improvement 2>",
-    "<concrete improvement 3>"
-  ],
-  "thumbnail_suggestion": "<one specific thumbnail composition change that would increase click-through, or 'Current thumbnail is strong' if good>",
-  "predicted_score_after": <float 0.0 to 1.0, estimated new viral potential after applying suggestions>,
-  "hook_rewrite": "<just the first sentence/hook, rewritten to be stronger>",
-  "best_posting_time": "<day and time window recommendation for {platform}>",
-  "vocabulary_suggestion": "<3-5 trending words or phrases your target audience uses on {platform}>"
+  "alignment_assessment": "<2 sentences: what works and what's misaligned>",
+  "rewritten_caption": "<improved version preserving creator's voice>",
+  "specific_improvements": ["<improvement 1>", "<improvement 2>", "<improvement 3>"],
+  "thumbnail_suggestion": "<one specific change to increase click-through, or 'Thumbnail looks strong'>",
+  "predicted_score_after": <float 0.0-1.0, estimated score after applying suggestions>,
+  "hook_rewrite": "<just the opening line, rewritten stronger>",
+  "best_posting_time": "<specific day and time window for {platform}>",
+  "vocabulary_suggestion": "<3-5 trending words your audience uses on {platform}>"
 }}"""
 
 
-def _init_client():
-    """Initialize Gemini client. Returns None if API key not set."""
+def _get_client():
+    """Return a configured Gemini client, or None if unavailable."""
     if not GEMINI_AVAILABLE:
         return None
-    key = GEMINI_API_KEY or os.getenv("GEMINI_API_KEY", "")
+    key = os.getenv("GEMINI_API_KEY", "")
     if not key:
         return None
-    genai.configure(api_key=key)
-    return genai.GenerativeModel(MODEL_NAME)
+    return genai.Client(api_key=key)
 
 
-def _image_to_part(image_bytes: bytes):
-    """Convert raw image bytes to Gemini Part."""
-    import google.generativeai as genai
-    return {
-        "mime_type": "image/jpeg",
-        "data": base64.b64encode(image_bytes).decode()
-    }
+def _clean_json(raw: str) -> str:
+    """Strip markdown fences from Gemini response."""
+    raw = raw.strip()
+    raw = re.sub(r'^```json\s*', '', raw)
+    raw = re.sub(r'^```\s*', '', raw)
+    raw = re.sub(r'\s*```$', '', raw)
+    return raw.strip()
+
+
+def _build_contents(prompt: str, image_bytes: Optional[bytes] = None) -> list:
+    """Build content parts list for Gemini request."""
+    parts = []
+    if image_bytes:
+        parts.append(types.Part.from_bytes(
+            data=image_bytes,
+            mime_type="image/jpeg"
+        ))
+    parts.append(types.Part.from_text(text=prompt))
+    return [types.Content(role="user", parts=parts)]
 
 
 def extract_features(
     caption: str,
     platform: str = "instagram",
     image_bytes: Optional[bytes] = None,
-    timeout: int = 10
 ) -> dict:
     """
-    Extract NLP features using Gemini (with fallback to nlp_engine.py).
-
-    Returns dict with same keys as nlp_engine.py extract_features().
-    Designed to be a drop-in replacement.
+    Extract NLP features via Gemini multimodal.
+    Drop-in replacement for nlp_engine.analyze_caption().
+    Falls back to local NLP engine if Gemini unavailable.
     """
-    client = _init_client()
+    client = _get_client()
 
-    # ── Fallback to local NLP if Gemini unavailable ──────────────────────────
     if client is None:
         try:
-            from engines.nlp_engine import NLPEngine
-            nlp = NLPEngine()
-            return nlp.extract_features(caption)
+            from engines.nlp_engine import analyze_caption
+            feats = analyze_caption(caption)
+            feats["_gemini_used"] = False
+            return feats
         except Exception:
-            return {**DEFAULT_FEATURES, "text_length": len(caption)}
+            return {**DEFAULT_FEATURES, "text_length": len(caption), "_gemini_used": False}
 
-    # ── Build Gemini request ──────────────────────────────────────────────────
     prompt = ANALYSIS_PROMPT.format(caption=caption[:2000], platform=platform)
-    parts = [prompt]
-    if image_bytes:
-        parts.insert(0, _image_to_part(image_bytes))  # image first for better attention
 
     try:
-        start = time.time()
-        response = client.generate_content(
-            parts,
-            generation_config={"temperature": 0.1, "max_output_tokens": 512}
+        t0 = time.time()
+        response = client.models.generate_content(
+            model=MODEL_NAME,
+            contents=_build_contents(prompt, image_bytes),
+            config=types.GenerateContentConfig(
+                temperature=0.1,
+                max_output_tokens=512,
+            )
         )
-        elapsed = time.time() - start
+        elapsed_ms = int((time.time() - t0) * 1000)
 
-        raw = response.text.strip()
-        # Strip any accidental markdown
-        raw = re.sub(r'^```json\s*', '', raw)
-        raw = re.sub(r'\s*```$', '', raw)
+        data = json.loads(_clean_json(response.text))
 
-        data = json.loads(raw)
         features = {**DEFAULT_FEATURES}
-
         for k in DEFAULT_FEATURES:
             if k in data:
                 features[k] = data[k]
 
-        # Store Gemini-only extras (for AI Content Director, not for LightGBM)
-        features["_gemini_hook_strength"]          = float(data.get("hook_strength", 0.5))
-        features["_gemini_visual_alignment"]       = float(data.get("visual_caption_alignment", 0.5))
-        features["_gemini_niche_relevance"]        = float(data.get("niche_relevance", 0.5))
-        features["_gemini_viral_potential"]        = float(data.get("viral_potential", 0.5))
-        features["_gemini_latency_ms"]             = int(elapsed * 1000)
-        features["_gemini_used"]                   = True
-
+        # Gemini-only extras (not fed to LightGBM, used by AI Director)
+        features["_gemini_hook_strength"]      = float(data.get("hook_strength", 0.5))
+        features["_gemini_visual_alignment"]   = float(data.get("visual_caption_alignment", 0.5))
+        features["_gemini_niche_relevance"]    = float(data.get("niche_relevance", 0.5))
+        features["_gemini_viral_potential"]    = float(data.get("viral_potential", 0.5))
+        features["_gemini_latency_ms"]         = elapsed_ms
+        features["_gemini_used"]               = True
         return features
 
     except json.JSONDecodeError:
-        # Gemini returned non-JSON — fallback gracefully
-        features = {**DEFAULT_FEATURES, "text_length": len(caption), "_gemini_used": False}
-        return features
+        return {**DEFAULT_FEATURES, "text_length": len(caption), "_gemini_used": False}
     except Exception as e:
-        features = {**DEFAULT_FEATURES, "text_length": len(caption),
-                    "_gemini_used": False, "_gemini_error": str(e)}
-        return features
+        try:
+            # Gemini failed — fall back to local NLP silently
+            from engines.nlp_engine import analyze_caption
+            feats = analyze_caption(caption)
+            feats["_gemini_used"] = False
+            feats["_gemini_error"] = str(e)[:80]
+            return feats
+        except Exception:
+            return {**DEFAULT_FEATURES, "text_length": len(caption),
+                    "_gemini_used": False, "_gemini_error": str(e)[:80]}
 
 
 def ai_content_director(
@@ -206,95 +203,84 @@ def ai_content_director(
     platform: str,
     current_score: float,
     tier: str,
-    image_bytes: Optional[bytes] = None
+    image_bytes: Optional[bytes] = None,
 ) -> dict:
     """
-    The AI Content Director — PreViral's flagship Gemini-powered feature.
-
-    Takes a caption + thumbnail and returns:
-    - Visual-caption alignment assessment
-    - Rewritten caption (preserves user voice)
-    - 3 specific improvements
-    - Thumbnail composition suggestion
-    - Predicted score after improvements
-    - Hook rewrite
-    - Best posting time
-    - Vocabulary suggestions
+    AI Content Director — PreViral's flagship Gemini feature.
+    Analyzes caption + thumbnail together and returns a complete content upgrade.
     """
-    client = _init_client()
-    if client is None:
-        return {
-            "alignment_assessment": "Gemini API key not configured.",
-            "rewritten_caption": caption,
-            "specific_improvements": [
-                "Add a stronger hook in the first sentence.",
-                "Include a clear call-to-action.",
-                "Use 3–5 niche-specific hashtags."
-            ],
-            "thumbnail_suggestion": "Add a human face to the frame.",
-            "predicted_score_after": min(current_score + 0.12, 0.95),
-            "hook_rewrite": caption[:60],
-            "best_posting_time": "Tuesday–Thursday, 11am–1pm",
-            "vocabulary_suggestion": "Use platform-native trending vocabulary.",
-            "_gemini_used": False
-        }
+    client = _get_client()
+    fallback = {
+        "alignment_assessment": "Add your GEMINI_API_KEY to enable AI Content Director.",
+        "rewritten_caption": caption,
+        "specific_improvements": [
+            "Add a stronger hook in your opening line.",
+            "Include a clear call-to-action (comment, share, follow).",
+            "Use 3-5 niche-specific hashtags.",
+        ],
+        "thumbnail_suggestion": "Add a human face for higher click-through rate.",
+        "predicted_score_after": round(min(current_score + 0.12, 0.95), 3),
+        "hook_rewrite": caption[:80].strip(),
+        "best_posting_time": "Tuesday–Thursday, 11am–1pm local time",
+        "vocabulary_suggestion": "Use emotionally charged, platform-native language.",
+        "_gemini_used": False,
+    }
 
-    visual_instruction = (
-        "A thumbnail image has been provided. Analyze visual-caption alignment carefully."
+    if client is None:
+        return fallback
+
+    visual_note = (
+        "A thumbnail image is provided — analyze visual-caption alignment carefully."
         if image_bytes else
-        "No thumbnail provided. Skip visual analysis, focus on caption only."
+        "No thumbnail provided — focus on caption only."
     )
 
-    prompt = CONTENT_DIRECTOR_PROMPT.format(
+    prompt = DIRECTOR_PROMPT.format(
         platform=platform,
         caption=caption[:2000],
         current_score=f"{current_score:.2f}",
         tier=tier,
-        visual_instruction=visual_instruction
+        visual_note=visual_note,
     )
 
-    parts = [prompt]
-    if image_bytes:
-        parts.insert(0, _image_to_part(image_bytes))
-
     try:
-        response = client.generate_content(
-            parts,
-            generation_config={"temperature": 0.4, "max_output_tokens": 1024}
+        response = client.models.generate_content(
+            model=MODEL_NAME,
+            contents=_build_contents(prompt, image_bytes),
+            config=types.GenerateContentConfig(
+                temperature=0.4,
+                max_output_tokens=1024,
+            )
         )
-        raw = response.text.strip()
-        raw = re.sub(r'^```json\s*', '', raw)
-        raw = re.sub(r'\s*```$', '', raw)
-        result = json.loads(raw)
+        result = json.loads(_clean_json(response.text))
         result["_gemini_used"] = True
         return result
     except Exception as e:
-        return {
-            "alignment_assessment": f"Analysis temporarily unavailable: {str(e)[:60]}",
-            "rewritten_caption": caption,
-            "specific_improvements": [
-                "Add a curiosity hook to your opening line.",
-                "Include a direct call-to-action.",
-                "Add 3 niche hashtags relevant to your audience."
-            ],
-            "thumbnail_suggestion": "Ensure your thumbnail has a clear focal point and human element.",
-            "predicted_score_after": min(current_score + 0.10, 0.95),
-            "hook_rewrite": caption[:80].strip() + "...",
-            "best_posting_time": "Tuesday–Thursday, 11am–1pm",
-            "vocabulary_suggestion": "Use emotional, active language specific to your niche.",
-            "_gemini_used": False,
-            "_error": str(e)
-        }
+        fallback["_gemini_error"] = str(e)[:100]
+        return fallback
 
 
 def health_check() -> dict:
-    """Quick health check — returns Gemini availability status."""
-    client = _init_client()
+    """Quick liveness check for the /gemini-status endpoint."""
+    client = _get_client()
     if client is None:
-        return {"gemini_available": False, "reason": "API key not set or library missing"}
+        key_set = bool(os.getenv("GEMINI_API_KEY", ""))
+        return {
+            "gemini_available": False,
+            "reason": "API key not set" if not key_set else "google-genai not installed",
+            "sdk": "google-genai (new)",
+        }
     try:
-        r = client.generate_content("Reply with: OK",
-            generation_config={"max_output_tokens": 5})
-        return {"gemini_available": True, "model": MODEL_NAME, "response": r.text.strip()}
+        r = client.models.generate_content(
+            model=MODEL_NAME,
+            contents="Reply with exactly: PREVIRAL_OK",
+            config=types.GenerateContentConfig(max_output_tokens=10)
+        )
+        return {
+            "gemini_available": True,
+            "model": MODEL_NAME,
+            "sdk": "google-genai (new)",
+            "response": r.text.strip(),
+        }
     except Exception as e:
-        return {"gemini_available": False, "error": str(e)}
+        return {"gemini_available": False, "error": str(e)[:120], "sdk": "google-genai (new)"}
