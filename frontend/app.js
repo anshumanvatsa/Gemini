@@ -1,386 +1,562 @@
-/* ============================================================
-   PreViral — app.js
-   Handles form submission, API calls, and all UI rendering
-   ============================================================ */
+/* ── PreViral App Logic ─────────────────────────────────────────────── */
 
-const API_BASE = window.location.origin + '/api/v1';
+const API_BASE = '';  // same origin
 let selectedPlatform = 'instagram';
+let mediaFile = null;
+let lastResult = null;
 
-// ── Platform Selector ─────────────────────────────────────────
-document.querySelectorAll('.platform-btn').forEach(btn => {
-  btn.addEventListener('click', () => {
-    document.querySelectorAll('.platform-btn').forEach(b => b.classList.remove('active'));
-    btn.classList.add('active');
-    selectedPlatform = btn.dataset.platform;
-    document.getElementById('selectedPlatform').value = selectedPlatform;
-  });
+// ── Init ────────────────────────────────────────────────────────────────
+document.addEventListener('DOMContentLoaded', () => {
+  setupPlatformPills();
+  setupUpload();
+  setupForm();
+  setupCharCounter();
+  setupReanalyze();
+  checkReportRoute();
 });
 
-// ── Caption live counter ──────────────────────────────────────
-const captionEl = document.getElementById('caption');
-captionEl.addEventListener('input', () => {
-  const text = captionEl.value;
-  const hashtags = (text.match(/#\w+/g) || []).length;
-  document.getElementById('charCount').textContent = `${text.length} characters`;
-  document.getElementById('hashtagCount').textContent = `${hashtags} hashtag${hashtags !== 1 ? 's' : ''}`;
-});
-
-// ── Image Upload Preview + Async Vision Preprocessing ────────
-let visionCacheId = null;
-let visionProcessing = false;
-
-async function preprocessImage(file, platform) {
-  if (!file || !file.type.startsWith('image/')) return;
-  visionProcessing = true;
-
-  // Show "Analyzing thumbnail..." indicator
-  const uploadHint = document.querySelector('.upload-hint');
-  if (uploadHint) uploadHint.textContent = 'Analyzing thumbnail (face detection, CLIP)...';
-
-  try {
-    const fd = new FormData();
-    fd.append('media', file);
-    fd.append('platform', selectedPlatform);
-    const res = await fetch(`${API_BASE}/preprocess-media`, { method: 'POST', body: fd });
-    if (res.ok) {
-      const data = await res.json();
-      visionCacheId = data.vision_cache_id;
-      if (uploadHint) uploadHint.textContent = 'Thumbnail analyzed! Face detection + CLIP ready.';
-    }
-  } catch (e) {
-    console.warn('Vision preprocessing failed (will run at analyze time):', e);
-  } finally {
-    visionProcessing = false;
+// ── Route: shared report page ──────────────────────────────────────────
+function checkReportRoute() {
+  const path = window.location.pathname;
+  const m = path.match(/^\/report\/([a-zA-Z0-9-]+)$/);
+  if (m) {
+    document.getElementById('hero').style.display = 'none';
+    document.getElementById('inputSection').style.display = 'none';
+    loadSharedReport(m[1]);
   }
 }
 
-mediaInput.addEventListener('change', (e) => {
-  const file = e.target.files[0];
-  if (file && file.type.startsWith('image/')) {
-    const reader = new FileReader();
-    reader.onload = (ev) => {
-      imagePreview.src = ev.target.result;
-      imagePreview.classList.remove('hidden');
-      uploadContent.classList.add('hidden');
-    };
-    reader.readAsDataURL(file);
-    // Fire async CLIP preprocessing immediately — don't wait for Analyze
-    preprocessImage(file, selectedPlatform);
-  }
-});
-
-uploadZone.addEventListener('dragover', (e) => { e.preventDefault(); uploadZone.classList.add('drag-over'); });
-uploadZone.addEventListener('dragleave', () => { uploadZone.classList.remove('drag-over'); });
-uploadZone.addEventListener('drop', (e) => {
-  e.preventDefault();
-  uploadZone.classList.remove('drag-over');
-  const file = e.dataTransfer.files[0];
-  if (file) { mediaInput.files = e.dataTransfer.files; mediaInput.dispatchEvent(new Event('change')); }
-});
-
-
-// ── Set default datetime to now + 2 hours ────────────────────
-const dtInput = document.getElementById('postDatetime');
-const now = new Date();
-now.setHours(now.getHours() + 2);
-dtInput.value = now.toISOString().slice(0, 16);
-
-// ── Form Submit ───────────────────────────────────────────────
-const form = document.getElementById('analyzeForm');
-const analyzeBtn = document.getElementById('analyzeBtn');
-const btnText = analyzeBtn.querySelector('.btn-text');
-const btnIcon = analyzeBtn.querySelector('.btn-icon');
-const btnLoading = analyzeBtn.querySelector('.btn-loading');
-
-form.addEventListener('submit', async (e) => {
-  e.preventDefault();
-  setLoading(true);
-
-  try {
-    const formData = new FormData(form);
-    // Ensure platform is set
-    formData.set('platform', selectedPlatform);
-    // Inject pre-computed vision cache id (CLIP ran during thumbnail upload)
-    if (visionCacheId) {
-      formData.set('vision_cache_id', visionCacheId);
-    }
-    // Convert engagement rate from % to decimal
-    const er = parseFloat(formData.get('avg_engagement_rate')) / 100;
-    formData.set('avg_engagement_rate', er.toString());
-
-    const res = await fetch(`${API_BASE}/analyze`, {
-      method: 'POST',
-      body: formData
+// ── Platform Pills ──────────────────────────────────────────────────────
+function setupPlatformPills() {
+  document.querySelectorAll('.pill').forEach(btn => {
+    btn.addEventListener('click', () => {
+      document.querySelectorAll('.pill').forEach(p => p.classList.remove('active'));
+      btn.classList.add('active');
+      selectedPlatform = btn.dataset.platform;
     });
+  });
+}
 
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({}));
-      throw new Error(err.detail || `Server error: ${res.status}`);
-    }
+// ── Upload ──────────────────────────────────────────────────────────────
+function setupUpload() {
+  const zone = document.getElementById('uploadZone');
+  const input = document.getElementById('mediaInput');
+  const preview = document.getElementById('thumbPreview');
+  const img = document.getElementById('thumbImg');
+  const removeBtn = document.getElementById('thumbRemove');
 
-    const data = await res.json();
-    renderResults(data);
+  zone.addEventListener('click', () => input.click());
+  zone.addEventListener('dragover', e => { e.preventDefault(); zone.classList.add('drag-over'); });
+  zone.addEventListener('dragleave', () => zone.classList.remove('drag-over'));
+  zone.addEventListener('drop', e => {
+    e.preventDefault(); zone.classList.remove('drag-over');
+    const f = e.dataTransfer.files[0];
+    if (f && f.type.startsWith('image/')) setFile(f);
+  });
+  input.addEventListener('change', () => { if (input.files[0]) setFile(input.files[0]); });
+  removeBtn.addEventListener('click', () => clearFile());
 
-  } catch (err) {
-    showToast(err.message || 'Analysis failed. Make sure the API is running.');
-    console.error(err);
-  } finally {
-    setLoading(false);
+  function setFile(f) {
+    mediaFile = f;
+    const url = URL.createObjectURL(f);
+    img.src = url;
+    zone.style.display = 'none';
+    preview.style.display = 'flex';
   }
-});
-
-function setLoading(loading) {
-  analyzeBtn.disabled = loading;
-  btnText.classList.toggle('hidden', loading);
-  btnIcon.classList.toggle('hidden', loading);
-  btnLoading.classList.toggle('hidden', !loading);
+  function clearFile() {
+    mediaFile = null;
+    input.value = '';
+    zone.style.display = 'block';
+    preview.style.display = 'none';
+    img.src = '';
+  }
 }
 
-// ── Render Results ────────────────────────────────────────────
-function renderResults(data) {
-  document.getElementById('inputPanel').classList.add('hidden');
-  const resultsPanel = document.getElementById('resultsPanel');
-  resultsPanel.classList.remove('hidden');
-  resultsPanel.scrollIntoView({ behavior: 'smooth', block: 'start' });
-
-  // Score Card
-  const badge = document.getElementById('predictionBadge');
-  badge.textContent = data.prediction;
-  badge.className = 'prediction-badge ' + data.prediction.toLowerCase();
-
-  const pct = document.getElementById('confidencePct');
-  animateNumber(pct, 0, Math.round(data.confidence * 100), 1000, '%');
-
-  // Confidence Ring
-  const arc = document.getElementById('confidenceArc');
-  const circumference = 326.73;
-  const offset = circumference - (data.confidence * circumference);
-  setTimeout(() => {
-    arc.style.transition = 'stroke-dashoffset 1.2s cubic-bezier(0.4,0,0.2,1)';
-    arc.style.strokeDashoffset = offset;
-  }, 100);
-
-  document.getElementById('scoreHeadline').textContent = data.headline;
-  document.getElementById('reachPercentile').textContent = `Top ${100 - data.reach_percentile}%`;
-  document.getElementById('processingTime').textContent = `${data.processing_time_ms.toFixed(0)}ms`;
-  document.getElementById('platformBadge').textContent = data.platform.charAt(0).toUpperCase() + data.platform.slice(1);
-
-  // Trajectory Chart
-  renderTrajectory(data.trajectory, data.prediction);
-
-  // Suggestions
-  renderSuggestions(data.suggestions);
-
-  // Feature Breakdown
-  renderFeatures({...data.nlp_features, ...data.hashtag_features, ...data.vision_features, ...data.timing_features});
-
-  // Hashtags
-  renderHashtags(data.hashtag_suggestions);
+// ── Char counter ────────────────────────────────────────────────────────
+function setupCharCounter() {
+  const ta = document.getElementById('caption');
+  const cnt = document.getElementById('charCount');
+  ta.addEventListener('input', () => {
+    cnt.textContent = ta.value.length;
+    cnt.style.color = ta.value.length > 2000 ? 'var(--orange)' : '';
+  });
 }
 
-// ── Trajectory Chart (Canvas) ─────────────────────────────────
-function renderTrajectory(trajectory, prediction) {
-  const canvas = document.getElementById('trajectoryCanvas');
+// ── Reanalyze button ────────────────────────────────────────────────────
+function setupReanalyze() {
+  document.getElementById('reanalyzeBtn').addEventListener('click', () => {
+    showSection('input');
+    document.getElementById('caption').value = '';
+    document.getElementById('charCount').textContent = '0';
+  });
+}
+
+// ── Form Submit ─────────────────────────────────────────────────────────
+function setupForm() {
+  document.getElementById('analyzeForm').addEventListener('submit', async e => {
+    e.preventDefault();
+    const caption = document.getElementById('caption').value.trim();
+    if (!caption) { alert('Please enter a caption.'); return; }
+
+    showSection('loading');
+    startLoadingAnimation();
+
+    const fd = new FormData();
+    fd.append('caption', caption);
+    fd.append('platform', selectedPlatform);
+    fd.append('follower_count', document.getElementById('followerCount').value || 10000);
+    fd.append('niche', document.getElementById('niche').value);
+    fd.append('post_datetime', new Date().toISOString());
+    if (mediaFile) fd.append('media', mediaFile);
+
+    try {
+      const res = await fetch(`${API_BASE}/api/v1/analyze`, { method: 'POST', body: fd });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      lastResult = { caption, platform: selectedPlatform, ...data };
+      showSection('results');
+      renderResults(data, caption);
+
+      // Fire AI Director call async after main results are shown
+      triggerAIDirector(caption, selectedPlatform, data.confidence, data.prediction);
+
+    } catch (err) {
+      alert(`Analysis failed: ${err.message}. Make sure the API is running.`);
+      showSection('input');
+    }
+  });
+}
+
+// ── Loading animation ───────────────────────────────────────────────────
+let loadingTimer = null;
+function startLoadingAnimation() {
+  const steps = [
+    { text: 'Gemini reading visual signals...', sub: 0, pct: 20 },
+    { text: 'Scoring hook strength & sentiment...', sub: 1, pct: 45 },
+    { text: 'Running LightGBM prediction...', sub: 2, pct: 75 },
+    { text: 'Generating counterfactuals...', sub: 3, pct: 95 },
+  ];
+  let i = 0;
+  // Reset
+  document.querySelectorAll('.substep').forEach(s => s.classList.remove('active','done'));
+  document.getElementById('loadingBar').style.width = '5%';
+
+  function advance() {
+    if (i < steps.length) {
+      const s = steps[i];
+      document.getElementById('loadingStep').textContent = s.text;
+      document.getElementById('loadingBar').style.width = s.pct + '%';
+      if (i > 0) {
+        document.getElementById('sub' + (i-1)).classList.remove('active');
+        document.getElementById('sub' + (i-1)).classList.add('done');
+      }
+      document.getElementById('sub' + s.sub).classList.add('active');
+      i++;
+      loadingTimer = setTimeout(advance, 750);
+    }
+  }
+  advance();
+}
+
+// ── Section manager ─────────────────────────────────────────────────────
+function showSection(name) {
+  const sections = {
+    hero:    document.getElementById('hero'),
+    input:   document.getElementById('inputSection'),
+    loading: document.getElementById('loadingSection'),
+    results: document.getElementById('resultsSection'),
+    report:  document.getElementById('reportSection'),
+  };
+  Object.values(sections).forEach(s => { if(s) s.style.display = 'none'; });
+  if (loadingTimer) { clearTimeout(loadingTimer); loadingTimer = null; }
+
+  if (name === 'input') {
+    sections.hero.style.display = '';
+    sections.input.style.display = '';
+  } else if (name === 'loading') {
+    sections.loading.style.display = '';
+  } else if (name === 'results') {
+    sections.input.style.display = '';
+    sections.results.style.display = '';
+  } else if (name === 'report') {
+    sections.report.style.display = '';
+  }
+}
+
+// ── Render results ──────────────────────────────────────────────────────
+function renderResults(data, caption) {
+  const tier = data.prediction || 'MEDIUM';
+  const conf = data.confidence || 0.5;
+  const reach = data.reach_percentile || 50;
+
+  // Verdict
+  document.getElementById('verdictTier').textContent = tier;
+  document.getElementById('verdictTier').className = `verdict-tier ${tier}`;
+  document.getElementById('verdictHeadline').textContent = data.headline || '';
+
+  // Gauge
+  animateGauge(conf, tier);
+
+  // Reach
+  document.getElementById('reachPct').textContent = reach;
+
+  // Score breakdown
+  const nlp = data.nlp_features || {};
+  const ht  = data.hashtag_features || {};
+  const tm  = data.timing_features || {};
+
+  const hookVal = nlp.gemini_hook_strength ?? nlp._gemini_hook_strength ?? (nlp.clickbait_score * 0.5 + (nlp.cta_present || 0) * 0.5);
+  const sentVal = ((nlp.sentiment_score || 0) + 1) / 2;
+  const timeVal = tm.peak_overlap_score || tm.day_of_week_score || 0.5;
+  const hashVal = Math.min((ht.trending_hashtag_count || 0) * 0.15 + (ht.avg_competition_ratio !== undefined ? (1 - ht.avg_competition_ratio) * 0.5 : 0.4), 1);
+
+  animateBar('bkHook', 'bkHookVal', hookVal);
+  animateBar('bkSent', 'bkSentVal', sentVal);
+  animateBar('bkTime', 'bkTimeVal', timeVal);
+  animateBar('bkHash', 'bkHashVal', hashVal);
+
+  // Trajectory
+  if (data.trajectory && data.trajectory.length) {
+    requestAnimationFrame(() => drawTrajectory(data.trajectory, tier));
+  } else {
+    document.getElementById('trajectoryCard').style.display = 'none';
+  }
+
+  // Counterfactuals
+  renderCFs(data.suggestions || []);
+
+  // Share button
+  setupShareBtn(data, caption);
+
+  // Scroll into view
+  document.getElementById('resultsSection').scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
+// ── Gauge animation ──────────────────────────────────────────────────────
+function animateGauge(conf, tier) {
+  const fill = document.getElementById('gaugeFill');
+  const pctEl = document.getElementById('gaugePct');
+  const circumference = 314;
+  fill.className = `gauge-fill ${tier}`;
+
+  let current = 0;
+  const target = Math.round(conf * 100);
+  const interval = setInterval(() => {
+    current = Math.min(current + 2, target);
+    pctEl.textContent = current + '%';
+    fill.style.strokeDashoffset = circumference - (current / 100) * circumference;
+    if (current >= target) clearInterval(interval);
+  }, 16);
+}
+
+// ── Bar animation ────────────────────────────────────────────────────────
+function animateBar(barId, valId, value) {
+  const pct = Math.round(Math.min(Math.max(value, 0), 1) * 100);
+  document.getElementById(barId).style.width = pct + '%';
+  document.getElementById(valId).textContent = pct + '%';
+}
+
+// ── Trajectory chart (canvas) ─────────────────────────────────────────────
+function drawTrajectory(points, tier) {
+  const canvas = document.getElementById('trajectoryChart');
   const ctx = canvas.getContext('2d');
-  const W = canvas.width, H = canvas.height;
-  ctx.clearRect(0, 0, W, H);
+  const W = canvas.offsetWidth * devicePixelRatio;
+  const H = 220 * devicePixelRatio;
+  canvas.width = W; canvas.height = H;
+  ctx.scale(devicePixelRatio, devicePixelRatio);
+  const w = canvas.offsetWidth, h = 220;
 
-  const days = trajectory.map(t => t.day);
-  const mids = trajectory.map(t => t.mid);
-  const lows = trajectory.map(t => t.low);
-  const highs = trajectory.map(t => t.high);
+  const colors = { HIGH: '#10b981', MEDIUM: '#f59e0b', LOW: '#ef4444' };
+  const color = colors[tier] || '#6366f1';
 
-  const maxVal = Math.max(...highs) || 1;
-  const pad = { top: 20, right: 20, bottom: 30, left: 60 };
-  const chartW = W - pad.left - pad.right;
-  const chartH = H - pad.top - pad.bottom;
+  const PAD = { top: 20, right: 20, bottom: 40, left: 60 };
+  const cw = w - PAD.left - PAD.right;
+  const ch = h - PAD.top - PAD.bottom;
 
-  const xScale = (i) => pad.left + (i / (trajectory.length - 1)) * chartW;
-  const yScale = (v) => pad.top + chartH - (v / maxVal) * chartH;
+  const days  = points.map(p => p.day);
+  const highs = points.map(p => p.high);
+  const mids  = points.map(p => p.mid);
+  const lows  = points.map(p => p.low);
+  const maxV  = Math.max(...highs) * 1.1 || 1;
 
-  // Grid lines
+  const px = i => PAD.left + (i / (days.length - 1)) * cw;
+  const py = v => PAD.top + ch - (v / maxV) * ch;
+
+  const fmt = v => v >= 1e6 ? (v/1e6).toFixed(1)+'M' : v >= 1e3 ? (v/1e3).toFixed(0)+'K' : v;
+
+  // Grid
   ctx.strokeStyle = 'rgba(255,255,255,0.05)';
   ctx.lineWidth = 1;
-  [0.25, 0.5, 0.75, 1.0].forEach(frac => {
-    const y = yScale(maxVal * frac);
-    ctx.beginPath(); ctx.moveTo(pad.left, y); ctx.lineTo(W - pad.right, y); ctx.stroke();
-    ctx.fillStyle = 'rgba(148,163,184,0.5)'; ctx.font = '11px Inter';
-    ctx.textAlign = 'right'; ctx.fillText(fmtNum(maxVal * frac), pad.left - 8, y + 4);
-  });
+  for (let i = 0; i <= 4; i++) {
+    const y = PAD.top + (i / 4) * ch;
+    ctx.beginPath(); ctx.moveTo(PAD.left, y); ctx.lineTo(PAD.left + cw, y); ctx.stroke();
+    ctx.fillStyle = 'rgba(148,163,184,0.5)';
+    ctx.font = '11px Inter';
+    ctx.fillText(fmt(maxV * (1 - i/4)), 0, y + 4);
+  }
 
-  // Confidence band (fill between low and high)
+  // Band (high-low)
   ctx.beginPath();
-  highs.forEach((v, i) => i === 0 ? ctx.moveTo(xScale(i), yScale(v)) : ctx.lineTo(xScale(i), yScale(v)));
-  [...lows].reverse().forEach((v, i) => ctx.lineTo(xScale(lows.length - 1 - i), yScale(v)));
+  highs.forEach((v, i) => i === 0 ? ctx.moveTo(px(i), py(v)) : ctx.lineTo(px(i), py(v)));
+  lows.slice().reverse().forEach((v, i) => ctx.lineTo(px(lows.length - 1 - i), py(v)));
   ctx.closePath();
-  const bandColor = prediction === 'HIGH' ? 'rgba(168,85,247,0.12)' : 'rgba(249,115,22,0.08)';
-  ctx.fillStyle = bandColor;
+  ctx.fillStyle = color + '18';
   ctx.fill();
 
-  // Mid line
-  const lineColor = prediction === 'HIGH' ? '#a855f7' : '#f97316';
-  const grad = ctx.createLinearGradient(pad.left, 0, W - pad.right, 0);
-  grad.addColorStop(0, prediction === 'HIGH' ? '#a855f7' : '#f97316');
-  grad.addColorStop(1, prediction === 'HIGH' ? '#06b6d4' : '#ef4444');
+  // Mid line (animated)
+  let progress = 0;
+  const totalLen = mids.length - 1;
+  function drawFrame() {
+    ctx.clearRect(PAD.left, PAD.top - 5, cw + 5, ch + 10);
 
-  ctx.beginPath();
-  mids.forEach((v, i) => i === 0 ? ctx.moveTo(xScale(i), yScale(v)) : ctx.lineTo(xScale(i), yScale(v)));
-  ctx.strokeStyle = grad; ctx.lineWidth = 2.5; ctx.lineJoin = 'round';
-  ctx.stroke();
-
-  // Dots
-  mids.forEach((v, i) => {
+    // Re-draw band
     ctx.beginPath();
-    ctx.arc(xScale(i), yScale(v), 5, 0, Math.PI * 2);
-    ctx.fillStyle = prediction === 'HIGH' ? '#a855f7' : '#f97316';
+    highs.forEach((v, i) => i === 0 ? ctx.moveTo(px(i), py(v)) : ctx.lineTo(px(i), py(v)));
+    lows.slice().reverse().forEach((v, i) => ctx.lineTo(px(lows.length - 1 - i), py(v)));
+    ctx.closePath();
+    ctx.fillStyle = color + '18';
     ctx.fill();
-    ctx.strokeStyle = 'rgba(5,5,8,0.8)'; ctx.lineWidth = 2; ctx.stroke();
-  });
 
-  // Day labels
-  const labels = document.getElementById('trajectoryLabels');
-  labels.innerHTML = '';
-  trajectory.forEach(t => {
-    const span = document.createElement('span');
-    span.textContent = `Day ${t.day}`;
-    labels.appendChild(span);
-  });
-}
-
-function fmtNum(n) {
-  if (n >= 1000000) return (n/1000000).toFixed(1) + 'M';
-  if (n >= 1000) return (n/1000).toFixed(0) + 'K';
-  return Math.round(n).toString();
-}
-
-// ── Suggestions ───────────────────────────────────────────────
-function renderSuggestions(suggestions) {
-  const list = document.getElementById('suggestionsList');
-  list.innerHTML = '';
-  if (!suggestions || suggestions.length === 0) {
-    list.innerHTML = '<p style="color:var(--text-muted);font-size:13px">Your post looks good! No major changes needed.</p>';
-    return;
-  }
-  suggestions.forEach((s, i) => {
-    const div = document.createElement('div');
-    div.className = 'suggestion-item';
-    div.style.animationDelay = `${i * 0.1}s`;
-    div.innerHTML = `
-      <div class="suggestion-header">
-        <span class="suggestion-feature">${s.feature.replace(/_/g, ' ')}</span>
-        <span class="suggestion-impact">${s.estimated_impact}</span>
-      </div>
-      <p class="suggestion-text">${s.suggestion}</p>
-    `;
-    list.appendChild(div);
-  });
-}
-
-// ── Feature Breakdown ─────────────────────────────────────────
-function renderFeatures(features) {
-  const grid = document.getElementById('featuresGrid');
-  grid.innerHTML = '';
-
-  const DISPLAY = {
-    sentiment_score: 'Sentiment',
-    emotional_valence: 'Emotional Valence',
-    clickbait_score: 'Hook Strength',
-    cta_present: 'Call-to-Action',
-    avg_competition_ratio: 'Hashtag Quality',
-    trending_hashtag_count: 'Trending Tags',
-    peak_overlap_score: 'Timing Score',
-    face_count: 'Face Detected',
-    brightness_score: 'Brightness',
-    color_vibrancy: 'Vibrancy',
-  };
-
-  Object.entries(DISPLAY).forEach(([key, label]) => {
-    let raw = features[key];
-    if (raw === undefined || raw === null) return;
-
-    // Normalize to 0-1 for the bar
-    let normalized = raw;
-    if (key === 'avg_competition_ratio') {
-      normalized = 1 - raw; // Lower competition = better
-    } else if (key === 'trending_hashtag_count') {
-      normalized = Math.min(raw / 5, 1);
-    } else if (key === 'face_count') {
-      normalized = Math.min(raw / 3, 1);
-    } else if (key === 'cta_present') {
-      normalized = raw;
-    } else {
-      normalized = Math.max(0, Math.min(raw, 1));
+    // Animated mid line
+    const draw_to = progress;
+    ctx.beginPath();
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 2.5;
+    ctx.lineJoin = 'round';
+    ctx.lineCap = 'round';
+    for (let i = 0; i <= draw_to && i < mids.length; i++) {
+      const frac = Math.min(progress - Math.floor(progress), 1);
+      let x = px(i), y = py(mids[i]);
+      if (i === Math.floor(draw_to) && i < mids.length - 1 && frac < 1) {
+        x = px(i) + (px(i+1) - px(i)) * frac;
+        y = py(mids[i]) + (py(mids[i+1]) - py(mids[i])) * frac;
+      }
+      i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
     }
+    ctx.stroke();
 
-    const display = typeof raw === 'number' ? (raw % 1 === 0 ? raw : raw.toFixed(2)) : raw;
+    // Dot on last drawn point
+    const ci = Math.min(Math.floor(draw_to), mids.length - 1);
+    const frac = Math.min(draw_to - ci, 1);
+    let dotX = px(ci), dotY = py(mids[ci]);
+    if (ci < mids.length - 1) {
+      dotX += (px(ci+1) - px(ci)) * frac;
+      dotY += (py(mids[ci+1]) - py(mids[ci])) * frac;
+    }
+    ctx.beginPath();
+    ctx.arc(dotX, dotY, 5, 0, Math.PI * 2);
+    ctx.fillStyle = color;
+    ctx.fill();
 
-    const row = document.createElement('div');
-    row.className = 'feature-row';
-    row.innerHTML = `
-      <span class="feature-name">${label}</span>
-      <div class="feature-bar-wrap">
-        <div class="feature-bar" style="width: ${(normalized * 100).toFixed(0)}%"></div>
-      </div>
-      <span class="feature-val">${display}</span>
-    `;
-    grid.appendChild(row);
-  });
+    if (progress < totalLen) {
+      progress = Math.min(progress + 0.05, totalLen);
+      requestAnimationFrame(drawFrame);
+    } else {
+      // Labels on final points
+      ctx.fillStyle = 'rgba(148,163,184,0.8)';
+      ctx.font = '11px Inter';
+      days.forEach((d, i) => {
+        ctx.fillText('Day ' + d, px(i) - 15, h - 8);
+      });
+      // Point values
+      ctx.fillStyle = color;
+      ctx.font = '11px Inter';
+      mids.forEach((v, i) => ctx.fillText(fmt(v), px(i) - 12, py(v) - 10));
+    }
+  }
+  drawFrame();
 }
 
-// ── Hashtags ──────────────────────────────────────────────────
-function renderHashtags(hashtags) {
-  const list = document.getElementById('hashtagList');
+// ── Counterfactuals ──────────────────────────────────────────────────────
+const CF_ICONS = ['🎯', '⏰', '#️⃣', '😊', '📸', '💡', '🔥', '📝'];
+function renderCFs(suggestions) {
+  const list = document.getElementById('cfList');
   list.innerHTML = '';
-  if (!hashtags || hashtags.length === 0) {
-    list.innerHTML = '<p style="color:var(--text-muted);font-size:13px">No hashtag suggestions available for this niche yet.</p>';
+  const items = suggestions.slice(0, 3);
+  if (!items.length) {
+    list.innerHTML = '<div class="cf-item"><div class="cf-text"><strong>🎉 Your post is already optimized!</strong><span>The analysis found no major improvements needed.</span></div></div>';
     return;
   }
-  hashtags.forEach(h => {
-    const div = document.createElement('div');
-    div.className = 'hashtag-item';
-    div.title = `Relevance: ${(h.relevance_score * 100).toFixed(0)}% | Competition: ${(h.competition_score * 100).toFixed(0)}%`;
-    div.innerHTML = `
-      <span class="hashtag-tag">${h.hashtag}</span>
-      <div class="hashtag-meta">
-        <span class="hashtag-comp">comp: ${(h.competition_score * 100).toFixed(0)}%</span>
-        <span class="hashtag-status ${h.trend_status}">${h.trend_status}</span>
+  items.forEach((s, i) => {
+    const el = document.createElement('div');
+    el.className = 'cf-item';
+    const title = s.suggestion || s.title || 'Improvement';
+    const detail = s.detail || s.explanation || '';
+    const impact = s.impact || s.estimated_lift || '';
+    el.innerHTML = `
+      <div class="cf-icon">${CF_ICONS[i % CF_ICONS.length]}</div>
+      <div class="cf-text">
+        <strong>${title}</strong>
+        <span>${detail}</span>
       </div>
+      ${impact ? `<div class="cf-impact">+${impact}</div>` : ''}
     `;
-    div.addEventListener('click', () => {
-      // Insert hashtag into caption
-      const cap = document.getElementById('caption');
-      cap.value = cap.value.trimEnd() + ' ' + h.hashtag;
-      cap.dispatchEvent(new Event('input'));
-      div.style.background = 'rgba(168,85,247,0.1)';
-      setTimeout(() => div.style.background = '', 600);
-    });
-    list.appendChild(div);
+    list.appendChild(el);
   });
 }
 
-// ── Analyze Again ─────────────────────────────────────────────
-document.getElementById('analyzeAgainBtn').addEventListener('click', () => {
-  document.getElementById('resultsPanel').classList.add('hidden');
-  document.getElementById('inputPanel').classList.remove('hidden');
-  window.scrollTo({ top: 0, behavior: 'smooth' });
-});
+// ── AI Content Director ──────────────────────────────────────────────────
+async function triggerAIDirector(caption, platform, confidence, prediction) {
+  const body = document.getElementById('directorBody');
+  body.innerHTML = '<div class="director-loading"><div class="gemini-spinner"></div><span>Gemini is analyzing your content...</span></div>';
 
-// ── Number Animation ──────────────────────────────────────────
-function animateNumber(el, start, end, duration, suffix = '') {
-  const startTime = performance.now();
-  const update = (time) => {
-    const progress = Math.min((time - startTime) / duration, 1);
-    const eased = 1 - Math.pow(1 - progress, 3);
-    el.textContent = Math.round(start + (end - start) * eased) + suffix;
-    if (progress < 1) requestAnimationFrame(update);
-  };
-  requestAnimationFrame(update);
+  const fd = new FormData();
+  fd.append('caption', caption);
+  fd.append('platform', platform);
+  fd.append('follower_count', document.getElementById('followerCount').value || 10000);
+  if (mediaFile) fd.append('media', mediaFile);
+
+  try {
+    const res = await fetch(`${API_BASE}/api/v1/ai-director`, { method: 'POST', body: fd });
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const d = await res.json();
+    renderDirector(d, caption);
+    // Update lastResult with director data
+    if (lastResult) lastResult.director = d;
+  } catch (e) {
+    body.innerHTML = `<div class="insight-row"><span class="insight-icon">⚠️</span><span class="insight-text">AI Content Director unavailable: ${e.message}</span></div>`;
+  }
 }
 
-// ── Toast ─────────────────────────────────────────────────────
-function showToast(msg) {
-  const toast = document.getElementById('errorToast');
-  document.getElementById('toastMsg').textContent = msg;
-  toast.classList.remove('hidden');
-  setTimeout(() => toast.classList.add('hidden'), 5000);
+function renderDirector(d, originalCaption) {
+  const body = document.getElementById('directorBody');
+  const rewritten = d.rewritten_caption || originalCaption;
+  const currentConf = d.current_confidence || 0;
+  const afterConf   = d.predicted_score_after || Math.min(currentConf + 0.12, 0.95);
+  const liftPct     = Math.round((afterConf - currentConf) * 100);
+
+  body.innerHTML = `
+    <div class="caption-compare">
+      <div class="caption-box">
+        <div class="caption-box-label before">❌ Original</div>
+        <div class="caption-text before">${escHtml(originalCaption)}</div>
+      </div>
+      <div class="caption-box">
+        <div class="caption-box-label after">✅ Gemini Rewrite</div>
+        <div class="caption-text after" style="position:relative">
+          ${escHtml(rewritten)}
+          <button class="copy-btn" onclick="copyText(${JSON.stringify(rewritten)}, this)">Copy</button>
+        </div>
+      </div>
+    </div>
+
+    ${d.hook_rewrite ? `
+    <div class="insight-row">
+      <span class="insight-icon">🎣</span>
+      <div class="insight-text">
+        <strong>Hook rewrite:</strong>
+        "${escHtml(d.hook_rewrite)}"
+      </div>
+    </div>` : ''}
+
+    ${d.alignment_assessment ? `
+    <div class="insight-row">
+      <span class="insight-icon">👁️</span>
+      <div class="insight-text">${escHtml(d.alignment_assessment)}</div>
+    </div>` : ''}
+
+    ${(d.specific_improvements || []).map(imp => `
+    <div class="insight-row">
+      <span class="insight-icon">💡</span>
+      <div class="insight-text">${escHtml(imp)}</div>
+    </div>`).join('')}
+
+    ${d.thumbnail_suggestion ? `
+    <div class="insight-row">
+      <span class="insight-icon">🖼️</span>
+      <div class="insight-text"><strong>Thumbnail:</strong> ${escHtml(d.thumbnail_suggestion)}</div>
+    </div>` : ''}
+
+    ${d.best_posting_time ? `
+    <div class="insight-row">
+      <span class="insight-icon">⏰</span>
+      <div class="insight-text"><strong>Best time to post:</strong> ${escHtml(d.best_posting_time)}</div>
+    </div>` : ''}
+
+    ${d.vocabulary_suggestion ? `
+    <div class="insight-row">
+      <span class="insight-icon">🔤</span>
+      <div class="insight-text"><strong>Trending vocabulary:</strong> ${escHtml(d.vocabulary_suggestion)}</div>
+    </div>` : ''}
+
+    ${liftPct > 0 ? `
+    <div class="score-lift">
+      <div>
+        <div class="lift-label">Predicted score lift after applying suggestions</div>
+        <div class="lift-val">+${liftPct}%</div>
+      </div>
+      <div class="lift-arrow">→</div>
+      <div>
+        <div class="lift-label">New predicted confidence</div>
+        <div class="lift-val">${Math.round(afterConf * 100)}%</div>
+      </div>
+    </div>` : ''}
+  `;
+}
+
+// ── Share report ───────────────────────────────────────────────────────────
+function setupShareBtn(data, caption) {
+  document.getElementById('shareBtn').onclick = async () => {
+    const toast = document.getElementById('shareToast');
+    const urlInput = document.getElementById('shareUrl');
+    toast.style.display = 'none';
+    try {
+      const payload = { caption, platform: selectedPlatform, ...data };
+      const res = await fetch(`${API_BASE}/api/v1/report`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      const r = await res.json();
+      const shareURL = `${window.location.origin}${r.share_url}`;
+      urlInput.value = shareURL;
+      toast.style.display = 'flex';
+      navigator.clipboard?.writeText(shareURL);
+      urlInput.select();
+    } catch (e) {
+      alert('Could not generate share link: ' + e.message);
+    }
+  };
+}
+
+// ── Load shared report ─────────────────────────────────────────────────────
+async function loadSharedReport(id) {
+  showSection('report');
+  const body = document.getElementById('reportBody');
+  const meta = document.getElementById('reportMeta');
+  body.innerHTML = '<div style="text-align:center;padding:40px;color:var(--text-sub)">Loading report...</div>';
+  try {
+    const res = await fetch(`${API_BASE}/api/v1/report/${id}`);
+    if (!res.ok) throw new Error('Report not found');
+    const report = await res.json();
+    const d = report.data || {};
+    meta.textContent = `Created ${new Date(report.created_at).toLocaleString()} · Platform: ${(d.platform || '').toUpperCase()}`;
+
+    const tier = d.prediction || 'MEDIUM';
+    const conf = d.confidence || 0;
+    body.innerHTML = `
+      <div style="margin-bottom:24px">
+        <div class="verdict-tier ${tier}" style="font-size:40px">${tier}</div>
+        <div style="font-size:14px;color:var(--text-sub);margin-top:8px">${d.headline || ''}</div>
+        <div style="margin-top:12px;font-size:28px;font-weight:800;color:var(--accent)">${Math.round(conf * 100)}% confidence</div>
+      </div>
+      ${d.caption ? `<div style="padding:16px;background:var(--surface2);border-radius:10px;font-size:14px;margin-bottom:20px;line-height:1.7">${escHtml(d.caption)}</div>` : ''}
+      <div style="display:flex;gap:12px;flex-wrap:wrap;margin-top:16px">
+        <a href="/" class="share-btn" style="text-decoration:none">⚡ Analyze your own post</a>
+      </div>
+    `;
+  } catch (e) {
+    body.innerHTML = `<div style="text-align:center;padding:40px;color:var(--red)">${e.message}</div>`;
+  }
+}
+
+// ── Helpers ────────────────────────────────────────────────────────────────
+function escHtml(str) {
+  return String(str || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+function copyText(text, btn) {
+  navigator.clipboard?.writeText(text).then(() => {
+    btn.textContent = 'Copied!';
+    setTimeout(() => btn.textContent = 'Copy', 2000);
+  });
 }
