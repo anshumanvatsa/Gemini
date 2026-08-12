@@ -30,6 +30,9 @@ pandas==2.2.2
 # Counterfactual Engine
 dice-ml==0.11
 
+# Gemini AI Integration (XPRIZE submission — core feature)
+google-generativeai>=0.8.0
+
 # Utilities
 python-dotenv==1.0.1
 aiofiles==23.2.1

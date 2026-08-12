@@ -22,6 +22,11 @@ from engines.timing_engine import analyze_timing
 from engines.vision_engine import analyze_image, no_image_defaults
 from counterfactual.dice_engine import generate_suggestions
 from api.routes.media import get_cached_vision
+try:
+    from engines.gemini_engine import extract_features as gemini_features, ai_content_director
+    GEMINI_ENGINE_AVAILABLE = True
+except ImportError:
+    GEMINI_ENGINE_AVAILABLE = False
 
 router = APIRouter()
 
@@ -258,14 +263,21 @@ async def analyze_post(
     if not cached_vision and media and media.filename:
         image_bytes = await media.read()
 
-    # Run all 4 engines in parallel
+    # Run all engines in parallel — Gemini runs alongside local NLP
     loop = asyncio.get_event_loop()
     nlp_task     = loop.run_in_executor(None, analyze_caption, caption)
     timing_task  = loop.run_in_executor(None, analyze_timing, platform, dt)
     hashtag_task = loop.run_in_executor(None, score_hashtags, hashtags, platform, caption)
 
+    # Gemini multimodal task — runs async so latency is hidden behind LightGBM
+    if GEMINI_ENGINE_AVAILABLE:
+        gemini_task = loop.run_in_executor(None, gemini_features, caption, platform, image_bytes)
+    else:
+        async def _no_gemini():
+            return {}
+        gemini_task = _no_gemini()
+
     if cached_vision:
-        # Cache hit: vision already done during upload, use it instantly
         async def _cached_vision_task():
             return cached_vision
         vision_task = _cached_vision_task()
@@ -276,9 +288,19 @@ async def analyze_post(
             return no_image_defaults()
         vision_task = _no_vision()
 
-    nlp_features, timing_features, hashtag_features, vision_features = await asyncio.gather(
-        nlp_task, timing_task, hashtag_task, vision_task
+    nlp_features, timing_features, hashtag_features, vision_features, gemini_nlp = await asyncio.gather(
+        nlp_task, timing_task, hashtag_task, vision_task, gemini_task
     )
+
+    # Merge Gemini features into NLP (Gemini wins on shared keys if available)
+    _gemini_extras = {k: v for k, v in gemini_nlp.items() if k.startswith('_gemini_')}
+    _gemini_core   = {k: v for k, v in gemini_nlp.items() if not k.startswith('_gemini_')}
+    if _gemini_core:
+        nlp_features = {**nlp_features, **_gemini_core}
+    nlp_features["gemini_hook_strength"]    = _gemini_extras.get("_gemini_hook_strength", 0.5)
+    nlp_features["gemini_visual_alignment"] = _gemini_extras.get("_gemini_visual_alignment", 0.5)
+    nlp_features["gemini_viral_potential"]  = _gemini_extras.get("_gemini_viral_potential", 0.5)
+    nlp_features["gemini_used"]             = bool(_gemini_extras.get("_gemini_used", False))
 
     # Build unified feature vector
     feature_vector = {
@@ -319,8 +341,7 @@ async def analyze_post(
 
     processing_time = (time.time() - start_time) * 1000
 
-    return AnalyzeResponse(
-        prediction=prediction,
+        prediction_label=prediction,
         confidence=round(confidence, 3),
         reach_percentile=reach_percentile,
         headline=headline,
@@ -334,3 +355,87 @@ async def analyze_post(
         platform=platform,
         processing_time_ms=round(processing_time, 1)
     )
+
+
+# ── AI Content Director Endpoint ─────────────────────────────────────────────
+@router.post("/ai-director")
+async def ai_director(
+    caption: str = Form(...),
+    platform: str = Form(...),
+    follower_count: Optional[int] = Form(1000),
+    avg_engagement_rate: Optional[float] = Form(0.03),
+    niche: Optional[str] = Form("tech"),
+    media: Optional[UploadFile] = File(None)
+):
+    """
+    AI Content Director — Gemini Pro Vision analyzes caption + thumbnail together.
+    Returns: rewritten caption, visual-caption alignment, 3 specific improvements,
+             thumbnail suggestion, hook rewrite, vocabulary, predicted score lift.
+    This is PreViral's flagship Gemini-native feature for the XPRIZE submission.
+    """
+    start_time = time.time()
+    dt = datetime.now()
+
+    image_bytes = None
+    if media and media.filename:
+        image_bytes = await media.read()
+
+    # Get current prediction score first
+    loop = asyncio.get_event_loop()
+    hashtags = extract_hashtags(caption)
+    nlp_task     = loop.run_in_executor(None, analyze_caption, caption)
+    timing_task  = loop.run_in_executor(None, analyze_timing, platform, dt)
+    hashtag_task = loop.run_in_executor(None, score_hashtags, hashtags, platform, caption)
+    nlp_f, timing_f, hashtag_f = await asyncio.gather(nlp_task, timing_task, hashtag_task)
+
+    feature_vector = {
+        **nlp_f, **hashtag_f, **timing_f, **no_image_defaults(),
+        "follower_count": follower_count / 1_000_000,
+        "avg_engagement_rate": avg_engagement_rate
+    }
+    prediction, confidence = run_lgbm(feature_vector)
+
+    # Run Gemini AI Content Director
+    if GEMINI_ENGINE_AVAILABLE:
+        director_result = await loop.run_in_executor(
+            None, ai_content_director,
+            caption, platform, confidence, prediction, image_bytes
+        )
+    else:
+        director_result = {
+            "alignment_assessment": "Gemini API not configured. Set GEMINI_API_KEY env var.",
+            "rewritten_caption": caption,
+            "specific_improvements": [
+                "Add a stronger hook in your opening line.",
+                "Include a clear call-to-action (comment, share, follow).",
+                "Use 3-5 niche hashtags your audience follows."
+            ],
+            "thumbnail_suggestion": "Add a human face to thumbnail for higher click-through.",
+            "predicted_score_after": round(min(confidence + 0.12, 0.95), 3),
+            "hook_rewrite": caption[:80].strip(),
+            "best_posting_time": "Tuesday-Thursday, 11am-1pm local time",
+            "vocabulary_suggestion": "Use emotionally charged, platform-native language.",
+            "_gemini_used": False
+        }
+
+    return {
+        "current_prediction": prediction,
+        "current_confidence": round(confidence, 3),
+        "platform": platform,
+        "gemini_used": director_result.get("_gemini_used", False),
+        **{k: v for k, v in director_result.items() if not k.startswith("_")},
+        "processing_time_ms": round((time.time() - start_time) * 1000, 1)
+    }
+
+
+# ── Gemini Health Check ───────────────────────────────────────────────────────
+@router.get("/gemini-status")
+async def gemini_status():
+    """Check if Gemini API is configured and responding."""
+    if not GEMINI_ENGINE_AVAILABLE:
+        return {"status": "unavailable", "reason": "google-generativeai not installed"}
+    try:
+        from engines.gemini_engine import health_check
+        return {"status": "ok", **health_check()}
+    except Exception as e:
+        return {"status": "error", "error": str(e)}
