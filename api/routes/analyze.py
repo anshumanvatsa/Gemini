@@ -341,7 +341,8 @@ async def analyze_post(
 
     processing_time = (time.time() - start_time) * 1000
 
-        prediction_label=prediction,
+    return AnalyzeResponse(
+        prediction=prediction,
         confidence=round(confidence, 3),
         reach_percentile=reach_percentile,
         headline=headline,
