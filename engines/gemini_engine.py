@@ -338,7 +338,18 @@ def ai_content_director(
         result["mode"]         = "optimizer" if is_high else "fixer"
         return result
     except Exception as e:
-        fallback["_gemini_error"] = str(e)[:100]
+        err_str = str(e)
+        if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str:
+            fallback["alignment_assessment"] = (
+                "⏳ Gemini quota reached for today. Your content analysis and score are still running. "
+                "AI rewrite will be available after your quota resets (usually midnight US Pacific time)."
+            )
+            fallback["_quota_exhausted"] = True
+        elif "API_KEY" in err_str or "api key" in err_str.lower():
+            fallback["alignment_assessment"] = "Add your GEMINI_API_KEY to enable AI Content Director."
+        else:
+            fallback["alignment_assessment"] = f"Gemini temporarily unavailable — your score analysis still ran."
+        fallback["_gemini_error"] = err_str[:100]
         return fallback
 
 
