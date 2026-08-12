@@ -19,6 +19,13 @@ import re
 import time
 from typing import Optional
 
+# ── Load .env automatically ───────────────────────────────────────────────────
+try:
+    from dotenv import load_dotenv
+    load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), '..', '.env'))
+except ImportError:
+    pass  # python-dotenv not installed — rely on env vars set by shell
+
 # ── New SDK (google-genai package) ────────────────────────────────────────────
 try:
     from google import genai
@@ -132,6 +139,27 @@ def _build_contents(prompt: str, image_bytes: Optional[bytes] = None) -> list:
     return [types.Content(role="user", parts=parts)]
 
 
+def _get_text(response) -> str:
+    """
+    Extract text from Gemini response robustly.
+    gemini-flash-latest is a thinking model — finish_reason=MAX_TOKENS is common
+    because thinking tokens eat the budget before the actual answer.
+    r.text returns None in that case, so we read from candidates directly.
+    """
+    # Try r.text first (works when finish_reason=STOP)
+    if response.text is not None:
+        return response.text
+    # Fall back: read text parts from candidates, skipping thought_signature parts
+    try:
+        for candidate in (response.candidates or []):
+            for part in (candidate.content.parts or []):
+                if hasattr(part, 'text') and part.text:
+                    return part.text
+    except Exception:
+        pass
+    return ""
+
+
 def extract_features(
     caption: str,
     platform: str = "instagram",
@@ -162,12 +190,12 @@ def extract_features(
             contents=_build_contents(prompt, image_bytes),
             config=types.GenerateContentConfig(
                 temperature=0.1,
-                max_output_tokens=512,
+                max_output_tokens=2048,
             )
         )
         elapsed_ms = int((time.time() - t0) * 1000)
 
-        data = json.loads(_clean_json(response.text))
+        data = json.loads(_clean_json(_get_text(response)))
 
         features = {**DEFAULT_FEATURES}
         for k in DEFAULT_FEATURES:
@@ -249,10 +277,10 @@ def ai_content_director(
             contents=_build_contents(prompt, image_bytes),
             config=types.GenerateContentConfig(
                 temperature=0.4,
-                max_output_tokens=1024,
+                max_output_tokens=4096,
             )
         )
-        result = json.loads(_clean_json(response.text))
+        result = json.loads(_clean_json(_get_text(response)))
         result["_gemini_used"] = True
         return result
     except Exception as e:
@@ -274,13 +302,13 @@ def health_check() -> dict:
         r = client.models.generate_content(
             model=MODEL_NAME,
             contents="Reply with exactly: PREVIRAL_OK",
-            config=types.GenerateContentConfig(max_output_tokens=10)
+            config=types.GenerateContentConfig(max_output_tokens=128)
         )
         return {
             "gemini_available": True,
             "model": MODEL_NAME,
             "sdk": "google-genai (new)",
-            "response": r.text.strip(),
+            "response": _get_text(r).strip(),
         }
     except Exception as e:
         return {"gemini_available": False, "error": str(e)[:120], "sdk": "google-genai (new)"}
@@ -361,13 +389,13 @@ def suggest_trending_hashtags(
             config=types.GenerateContentConfig(
                 tools=[types.Tool(google_search=types.GoogleSearch())],
                 temperature=0.2,
-                max_output_tokens=800,
+                max_output_tokens=2048,
             )
         )
         elapsed_ms = int((time.time() - t0) * 1000)
 
         # Gemini with grounding may wrap JSON in text — extract it
-        raw = response.text or ""
+        raw = _get_text(response) or ""
         # Find JSON block
         json_match = re.search(r'\{[\s\S]*\}', raw)
         if not json_match:
