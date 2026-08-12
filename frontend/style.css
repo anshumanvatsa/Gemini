@@ -537,3 +537,100 @@ select.form-input { cursor: pointer; }
   .meta-row { flex-direction: column; }
   .hero-stats { flex-direction: column; gap: 8px; }
 }
+
+/* ── 10-Day Report Card ───────────────────────────────────────────────────── */
+.report-card {
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+  margin-top: 16px;
+  animation: fadeUp 0.4s ease both;
+}
+.report-card-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 16px 20px 14px;
+  border-bottom: 1px solid var(--border);
+}
+.report-card-header h3 {
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--text);
+  letter-spacing: 0.02em;
+}
+.report-tier-badge {
+  margin-left: auto;
+  font-size: 11px;
+  font-weight: 700;
+  padding: 3px 10px;
+  border-radius: 20px;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+.report-tier-badge.high  { background: rgba(16,185,129,0.15); color: #10b981; border: 1px solid rgba(16,185,129,0.3); }
+.report-tier-badge.medium { background: rgba(245,158,11,0.15); color: #f59e0b; border: 1px solid rgba(245,158,11,0.3); }
+.report-tier-badge.low   { background: rgba(239,68,68,0.12);  color: #ef4444; border: 1px solid rgba(239,68,68,0.25); }
+
+.report-stats-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 0;
+}
+.report-stat {
+  padding: 20px;
+  border-right: 1px solid var(--border);
+  text-align: center;
+}
+.report-stat:last-child { border-right: none; }
+.report-stat-label {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  margin-bottom: 6px;
+}
+.report-stat-value {
+  font-size: 28px;
+  font-weight: 800;
+  letter-spacing: -0.03em;
+  line-height: 1;
+}
+.report-stat-value.mid   { color: var(--text); }
+.report-stat-value.best  { color: #10b981; }
+.report-stat-value.worst { color: #ef4444; }
+.report-stat-sub {
+  font-size: 10px;
+  color: var(--text-muted);
+  margin-top: 4px;
+}
+
+.report-meta {
+  display: flex;
+  gap: 24px;
+  padding: 14px 20px;
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  flex-wrap: wrap;
+}
+.report-meta-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text-sub);
+}
+.report-meta-item strong { color: var(--text); font-weight: 600; }
+
+.report-narrative {
+  padding: 14px 20px;
+  font-size: 13px;
+  color: var(--text-sub);
+  line-height: 1.6;
+  border-left: 3px solid var(--accent);
+  margin: 0 20px 18px;
+  border-radius: 0 6px 6px 0;
+  background: rgba(99,102,241,0.05);
+}

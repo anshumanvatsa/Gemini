@@ -222,6 +222,38 @@
         <canvas id="trajectoryChart" width="700" height="220"></canvas>
       </div>
 
+      <!-- 10-Day Report Card -->
+      <div class="report-card" id="reportCard" style="display:none">
+        <div class="report-card-header">
+          <span>📊</span>
+          <h3>10-Day Impression Report</h3>
+          <span class="report-tier-badge" id="reportTierBadge">—</span>
+        </div>
+        <div class="report-stats-grid">
+          <div class="report-stat">
+            <div class="report-stat-label">Expected Total</div>
+            <div class="report-stat-value mid" id="reportMid">—</div>
+            <div class="report-stat-sub">impressions</div>
+          </div>
+          <div class="report-stat">
+            <div class="report-stat-label">Best Case</div>
+            <div class="report-stat-value best" id="reportBest">—</div>
+            <div class="report-stat-sub">if boosted</div>
+          </div>
+          <div class="report-stat">
+            <div class="report-stat-label">Worst Case</div>
+            <div class="report-stat-value worst" id="reportWorst">—</div>
+            <div class="report-stat-sub">no engagement</div>
+          </div>
+        </div>
+        <div class="report-meta">
+          <div class="report-meta-item">📅 Peak day: <strong id="reportPeakDay">—</strong></div>
+          <div class="report-meta-item">📡 Daily reach rate: <strong id="reportReachRate">—</strong>% of followers</div>
+          <div class="report-meta-item">👥 Based on <strong id="reportFollowers">—</strong> followers</div>
+        </div>
+        <div class="report-narrative" id="reportNarrative">—</div>
+      </div>
+
       <!-- Counterfactuals -->
       <div class="counterfactuals-card glass" id="counterfactualsCard">
         <div class="section-header">

@@ -75,8 +75,11 @@ class AnalyzeResponse(BaseModel):
     platform: str
     processing_time_ms: float
 
-    # Real-time Trend Intelligence (Gemini Search Grounding)
+    # Real-time Trend Intelligence (Gemini)
     trending_hashtags: Optional[Dict[str, Any]] = None
+
+    # 10-Day Summary Report
+    ten_day_summary: Optional[Dict[str, Any]] = None
 
 
 class HashtagQueryRequest(BaseModel):

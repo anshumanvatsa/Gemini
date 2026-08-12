@@ -98,20 +98,36 @@ def generate_trajectory(confidence: float, follower_count: int, platform: str,
             pred_log_views = pred_norm * _lstm_tmax
             raw_views = _np.expm1(pred_log_views)  # [d1, d3, d7, d10]
 
-            # Scale by follower count context
+            # Scale by follower count context — calibrated to real impression ranges
             platform_mult = {
                 "tiktok": 8.0, "instagram": 4.0, "youtube": 12.0,
                 "twitter": 2.5, "linkedin": 1.8, "facebook": 2.0, "reddit": 3.0
             }.get(platform.lower(), 3.0)
             scale = max(0.1, follower_count / 10000) * platform_mult * confidence
 
-            mids = [max(100, int(v * scale * 0.01)) for v in raw_views]
-            spreads = [0.25, 0.30, 0.35, 0.40]
+            # Apply tier-shaped curve multipliers (same logic as heuristic)
+            raw_normalized = [max(1.0, float(v * scale * 0.01)) for v in raw_views]
+            max_raw = max(raw_normalized)
+
+            if confidence > 0.65:
+                curve_mult = [0.30, 0.55, 1.00, 0.85]  # growth spike
+            elif confidence > 0.40:
+                curve_mult = [0.40, 0.80, 0.85, 0.70]  # plateau
+            else:
+                curve_mult = [1.00, 0.75, 0.42, 0.21]  # decay
+
+            base = max(follower_count * 0.08, 400)
+            mids = [max(int(base * cm), int(base * cm)) for cm in curve_mult]
+            # Scale up by model signal
+            signal_boost = max(1.0, max_raw / 10.0)
+            mids = [max(int(m * signal_boost), int(base * cm)) for m, cm in zip(mids, curve_mult)]
+
+            spreads = [0.20, 0.25, 0.30, 0.35]
             return [
                 TrajectoryPoint(
                     day=d,
                     low=max(0, int(m * (1 - sp))),
-                    mid=m,
+                    mid=max(1, m),
                     high=int(m * (1 + sp))
                 )
                 for d, m, sp in zip([1, 3, 7, 10], mids, spreads)
@@ -376,6 +392,64 @@ async def analyze_post(
     # Strip internal keys from trending data before sending to client
     clean_trending = {k: v for k, v in trending_data.items() if not k.startswith("_")}
 
+    # ── Build 10-Day Summary Report ────────────────────────────────────────────
+    traj_mids  = [p.mid  for p in trajectory]
+    traj_highs = [p.high for p in trajectory]
+    traj_lows  = [p.low  for p in trajectory]
+
+    # Interpolate days between the 4 anchor points (days 1,3,7,10)
+    # Weight: day1=1, day2-3=2 days, day4-7=4 days, day8-10=3 days
+    weights     = [1, 2, 4, 3]  # day spans represented by each point
+    total_mid   = sum(m * w for m, w in zip(traj_mids,  weights))
+    total_best  = sum(h * w for h, w in zip(traj_highs, weights))
+    total_worst = sum(l * w for l, w in zip(traj_lows,  weights))
+
+    peak_day_map = {1: "Day 1", 3: "Day 3", 7: "Day 7", 10: "Day 10"}
+    peak_idx     = traj_mids.index(max(traj_mids))
+    peak_day_label = ["Day 1", "Day 3", "Day 7", "Day 10"][peak_idx]
+
+    daily_reach_rate = round((total_mid / 10) / max(follower_count, 1) * 100, 1)
+
+    if prediction == "HIGH":
+        narrative = (
+            f"Strong viral trajectory — algorithm pickup expected by {peak_day_label}. "
+            f"Post in the next peak window and monitor first-hour engagement. "
+            f"If it exceeds your average, boost immediately."
+        )
+        tier_label = "Strong Growth"
+    elif prediction == "MEDIUM":
+        narrative = (
+            f"Moderate reach expected — algorithm will show this to your core audience "
+            f"but organic spread will be limited. Apply the suggested changes to push into HIGH territory."
+        )
+        tier_label = "Steady Reach"
+    else:
+        narrative = (
+            f"Low organic reach predicted — the algorithm is unlikely to distribute this beyond "
+            f"your existing followers. Apply at least 2 of the 3 suggestions below before posting."
+        )
+        tier_label = "Limited Reach"
+
+    def _fmt(n: int) -> str:
+        if n >= 1_000_000: return f"{n/1_000_000:.1f}M"
+        if n >= 1_000:     return f"{n/1_000:.0f}K"
+        return str(n)
+
+    ten_day_summary = {
+        "total_impressions_mid":   total_mid,
+        "total_impressions_best":  total_best,
+        "total_impressions_worst": total_worst,
+        "total_mid_fmt":    _fmt(total_mid),
+        "total_best_fmt":   _fmt(total_best),
+        "total_worst_fmt":  _fmt(total_worst),
+        "peak_day":         peak_day_label,
+        "daily_reach_rate": daily_reach_rate,
+        "tier_label":       tier_label,
+        "narrative":        narrative,
+        "platform":         platform,
+        "follower_count":   follower_count,
+    }
+
     return AnalyzeResponse(
         prediction=prediction,
         confidence=round(confidence, 3),
@@ -390,7 +464,8 @@ async def analyze_post(
         trajectory=trajectory,
         platform=platform,
         processing_time_ms=round(processing_time, 1),
-        trending_hashtags=clean_trending
+        trending_hashtags=clean_trending,
+        ten_day_summary=ten_day_summary
     )
 
 

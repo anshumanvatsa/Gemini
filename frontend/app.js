@@ -225,8 +225,11 @@ function renderResults(data, caption) {
   // Counterfactuals
   renderCFs(data.suggestions || []);
 
-  // Trending hashtags (Gemini Search Grounding)
+  // Trending hashtags (Gemini)
   renderTrending(data.trending_hashtags || {});
+
+  // 10-Day Report
+  renderTenDaySummary(data.ten_day_summary || null);
 
   // Share button
   setupShareBtn(data, caption);
@@ -465,6 +468,35 @@ function renderTrending(data) {
   }
 
   body.innerHTML = html;
+  card.classList.add('fade-in');
+}
+
+// ── 10-Day Impression Report ─────────────────────────────────────────────────
+function renderTenDaySummary(s) {
+  const card = document.getElementById('reportCard');
+  if (!s || (!s.total_mid_fmt)) { card.style.display = 'none'; return; }
+
+  card.style.display = '';
+
+  // Tier badge
+  const badge = document.getElementById('reportTierBadge');
+  badge.textContent = s.tier_label || '—';
+  badge.className = 'report-tier-badge ' + (s.tier_label === 'Strong Growth' ? 'high' : s.tier_label === 'Steady Reach' ? 'medium' : 'low');
+
+  // Stats
+  document.getElementById('reportMid').textContent   = s.total_mid_fmt   || '—';
+  document.getElementById('reportBest').textContent  = s.total_best_fmt  || '—';
+  document.getElementById('reportWorst').textContent = s.total_worst_fmt || '—';
+
+  // Meta
+  document.getElementById('reportPeakDay').textContent    = s.peak_day || '—';
+  document.getElementById('reportReachRate').textContent  = s.daily_reach_rate !== undefined ? s.daily_reach_rate : '—';
+  const fc = s.follower_count >= 1000 ? (s.follower_count/1000).toFixed(0)+'K' : s.follower_count;
+  document.getElementById('reportFollowers').textContent  = fc || '—';
+
+  // Narrative
+  document.getElementById('reportNarrative').textContent = s.narrative || '';
+
   card.classList.add('fade-in');
 }
 
