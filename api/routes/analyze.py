@@ -278,8 +278,17 @@ async def analyze_post(
             return {}
         gemini_task = _no_gemini()
 
-    # Gemini Search Grounding trend task — fully parallel, zero sequential cost
-    trend_task = loop.run_in_executor(None, suggest_trending_hashtags, caption, platform, niche or "general")
+    # Gemini Search Grounding trend task — fully parallel, 5s hard timeout
+    # Never blocks the main response — if grounding is slow, returns empty gracefully
+    async def _trend_with_timeout():
+        try:
+            raw = loop.run_in_executor(None, suggest_trending_hashtags, caption, platform, niche or "general")
+            return await asyncio.wait_for(raw, timeout=5.0)
+        except asyncio.TimeoutError:
+            return {"trending_now": [], "stable_performers": [], "avoid": [], "grounding_used": False, "_timeout": True}
+        except Exception:
+            return {"trending_now": [], "stable_performers": [], "avoid": [], "grounding_used": False}
+    trend_task = _trend_with_timeout()
 
     if cached_vision:
         async def _cached_vision_task():
