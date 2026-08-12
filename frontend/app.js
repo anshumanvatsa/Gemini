@@ -525,78 +525,169 @@ async function triggerAIDirector(caption, platform, confidence, prediction) {
 
 function renderDirector(d, originalCaption) {
   const body = document.getElementById('directorBody');
-  const rewritten = d.rewritten_caption || originalCaption;
+  const mode  = d.mode || (d.hook_variants ? 'optimizer' : 'fixer');
   const currentConf = d.current_confidence || 0;
-  const afterConf   = d.predicted_score_after || Math.min(currentConf + 0.12, 0.95);
+  const afterConf   = d.predicted_score_after || Math.min(currentConf + 0.08, 0.98);
   const liftPct     = Math.round((afterConf - currentConf) * 100);
 
-  body.innerHTML = `
-    <div class="caption-compare">
-      <div class="caption-box">
-        <div class="caption-box-label before">❌ Original</div>
-        <div class="caption-text before">${escHtml(originalCaption)}</div>
+  if (mode === 'optimizer') {
+    // ── OPTIMIZER MODE: best → better ────────────────────────────────────────
+    const variants = d.hook_variants || [];
+    const micro    = d.micro_improvements || [];
+    const toAdd    = d.hashtags_to_add || [];
+    const toRemove = d.hashtags_to_remove || [];
+    const angleColors = { Curiosity: '#6366f1', Authority: '#10b981', Story: '#f59e0b' };
+
+    body.innerHTML = `
+      <div class="optimizer-badge">
+        ⚡ Optimizer Mode — Marginal Gains Intelligence
+        <span class="optimizer-sub">Your caption is already HIGH. These are the gains Claude can't give you.</span>
       </div>
-      <div class="caption-box">
-        <div class="caption-box-label after">✅ Gemini Rewrite</div>
-        <div class="caption-text after" style="position:relative">
-          ${escHtml(rewritten)}
-          <button class="copy-btn" onclick="copyText(${JSON.stringify(rewritten)}, this)">Copy</button>
+
+      ${d.alignment_assessment ? `
+      <div class="insight-row">
+        <span class="insight-icon">✅</span>
+        <div class="insight-text"><strong>What's already excellent:</strong> ${escHtml(d.alignment_assessment)}</div>
+      </div>` : ''}
+
+      ${variants.length ? `
+      <div class="optimizer-section">
+        <div class="optimizer-section-title">🎣 A/B Hook Variants — Split-Test These</div>
+        <div class="optimizer-section-sub">3 alternative opening lines. Test which one gets more "See More" clicks.</div>
+        ${variants.map((v, i) => {
+          const col = angleColors[v.angle] || '#6366f1';
+          return `
+          <div class="hook-variant">
+            <span class="hook-angle-badge" style="background:${col}22;color:${col};border:1px solid ${col}44">${v.angle}</span>
+            <div class="hook-variant-text">"${escHtml(v.variant)}"</div>
+            <button class="copy-btn-sm" onclick="copyText(${JSON.stringify(v.variant)}, this)">Copy</button>
+          </div>`;
+        }).join('')}
+      </div>` : ''}
+
+      ${micro.length ? `
+      <div class="optimizer-section">
+        <div class="optimizer-section-title">🔧 Micro-Improvements — Surgical Tweaks Only</div>
+        ${micro.map(m => `
+        <div class="insight-row">
+          <span class="insight-icon">✂️</span>
+          <div class="insight-text">${escHtml(m)}</div>
+        </div>`).join('')}
+      </div>` : ''}
+
+      ${(toAdd.length || toRemove.length) ? `
+      <div class="optimizer-section">
+        <div class="optimizer-section-title">📈 Hashtag Velocity — Algorithm Signals</div>
+        ${toAdd.length ? `<div class="hashtag-velocity-row">
+          <span class="velocity-label add">▲ ADD</span>
+          ${toAdd.map(t => `<span class="velocity-tag add">${escHtml(t)}</span>`).join('')}
+        </div>` : ''}
+        ${toRemove.length ? `<div class="hashtag-velocity-row">
+          <span class="velocity-label remove">▼ REMOVE</span>
+          ${toRemove.map(t => `<span class="velocity-tag remove">${escHtml(t)}</span>`).join('')}
+        </div>` : ''}
+      </div>` : ''}
+
+      ${d.timing_edge ? `
+      <div class="insight-row">
+        <span class="insight-icon">⏱️</span>
+        <div class="insight-text"><strong>Algorithm timing edge:</strong> ${escHtml(d.timing_edge)}</div>
+      </div>` : ''}
+
+      ${d.competitive_gap ? `
+      <div class="insight-row" style="border-left:2px solid #f59e0b;padding-left:12px">
+        <span class="insight-icon">🏆</span>
+        <div class="insight-text"><strong>What top 1% posts do that this still lacks:</strong> ${escHtml(d.competitive_gap)}</div>
+      </div>` : ''}
+
+      ${d.vocabulary_suggestion ? `
+      <div class="insight-row">
+        <span class="insight-icon">🔤</span>
+        <div class="insight-text"><strong>Trending vocabulary:</strong> ${escHtml(d.vocabulary_suggestion)}</div>
+      </div>` : ''}
+
+      ${liftPct > 0 ? `
+      <div class="score-lift">
+        <div>
+          <div class="lift-label">Marginal gain from applying tweaks</div>
+          <div class="lift-val">+${liftPct}%</div>
+        </div>
+        <div class="lift-arrow">→</div>
+        <div>
+          <div class="lift-label">New predicted confidence</div>
+          <div class="lift-val">${Math.round(afterConf * 100)}%</div>
+        </div>
+      </div>` : ''}
+    `;
+
+  } else {
+    // ── FIXER MODE: low/medium — full rewrite ─────────────────────────────────
+    const rewritten = d.rewritten_caption || originalCaption;
+    body.innerHTML = `
+      <div class="caption-compare">
+        <div class="caption-box">
+          <div class="caption-box-label before">❌ Original</div>
+          <div class="caption-text before">${escHtml(originalCaption)}</div>
+        </div>
+        <div class="caption-box">
+          <div class="caption-box-label after">✅ Gemini Rewrite</div>
+          <div class="caption-text after" style="position:relative">
+            ${escHtml(rewritten)}
+            <button class="copy-btn" onclick="copyText(${JSON.stringify(rewritten)}, this)">Copy</button>
+          </div>
         </div>
       </div>
-    </div>
 
-    ${d.hook_rewrite ? `
-    <div class="insight-row">
-      <span class="insight-icon">🎣</span>
-      <div class="insight-text">
-        <strong>Hook rewrite:</strong>
-        "${escHtml(d.hook_rewrite)}"
-      </div>
-    </div>` : ''}
+      ${d.hook_rewrite ? `
+      <div class="insight-row">
+        <span class="insight-icon">🎣</span>
+        <div class="insight-text"><strong>Hook rewrite:</strong> "${escHtml(d.hook_rewrite)}"</div>
+      </div>` : ''}
 
-    ${d.alignment_assessment ? `
-    <div class="insight-row">
-      <span class="insight-icon">👁️</span>
-      <div class="insight-text">${escHtml(d.alignment_assessment)}</div>
-    </div>` : ''}
+      ${d.alignment_assessment ? `
+      <div class="insight-row">
+        <span class="insight-icon">👁️</span>
+        <div class="insight-text">${escHtml(d.alignment_assessment)}</div>
+      </div>` : ''}
 
-    ${(d.specific_improvements || []).map(imp => `
-    <div class="insight-row">
-      <span class="insight-icon">💡</span>
-      <div class="insight-text">${escHtml(imp)}</div>
-    </div>`).join('')}
+      ${(d.specific_improvements || []).map(imp => `
+      <div class="insight-row">
+        <span class="insight-icon">💡</span>
+        <div class="insight-text">${escHtml(imp)}</div>
+      </div>`).join('')}
 
-    ${d.thumbnail_suggestion ? `
-    <div class="insight-row">
-      <span class="insight-icon">🖼️</span>
-      <div class="insight-text"><strong>Thumbnail:</strong> ${escHtml(d.thumbnail_suggestion)}</div>
-    </div>` : ''}
+      ${d.thumbnail_suggestion ? `
+      <div class="insight-row">
+        <span class="insight-icon">🖼️</span>
+        <div class="insight-text"><strong>Thumbnail:</strong> ${escHtml(d.thumbnail_suggestion)}</div>
+      </div>` : ''}
 
-    ${d.best_posting_time ? `
-    <div class="insight-row">
-      <span class="insight-icon">⏰</span>
-      <div class="insight-text"><strong>Best time to post:</strong> ${escHtml(d.best_posting_time)}</div>
-    </div>` : ''}
+      ${d.best_posting_time ? `
+      <div class="insight-row">
+        <span class="insight-icon">⏰</span>
+        <div class="insight-text"><strong>Best time to post:</strong> ${escHtml(d.best_posting_time)}</div>
+      </div>` : ''}
 
-    ${d.vocabulary_suggestion ? `
-    <div class="insight-row">
-      <span class="insight-icon">🔤</span>
-      <div class="insight-text"><strong>Trending vocabulary:</strong> ${escHtml(d.vocabulary_suggestion)}</div>
-    </div>` : ''}
+      ${d.vocabulary_suggestion ? `
+      <div class="insight-row">
+        <span class="insight-icon">🔤</span>
+        <div class="insight-text"><strong>Trending vocabulary:</strong> ${escHtml(d.vocabulary_suggestion)}</div>
+      </div>` : ''}
 
-    ${liftPct > 0 ? `
-    <div class="score-lift">
-      <div>
-        <div class="lift-label">Predicted score lift after applying suggestions</div>
-        <div class="lift-val">+${liftPct}%</div>
-      </div>
-      <div class="lift-arrow">→</div>
-      <div>
-        <div class="lift-label">New predicted confidence</div>
-        <div class="lift-val">${Math.round(afterConf * 100)}%</div>
-      </div>
-    </div>` : ''}
-  `;
+      ${liftPct > 0 ? `
+      <div class="score-lift">
+        <div>
+          <div class="lift-label">Predicted score lift after applying suggestions</div>
+          <div class="lift-val">+${liftPct}%</div>
+        </div>
+        <div class="lift-arrow">→</div>
+        <div>
+          <div class="lift-label">New predicted confidence</div>
+          <div class="lift-val">${Math.round(afterConf * 100)}%</div>
+        </div>
+      </div>` : ''}
+    `;
+  }
 }
 
 // ── Share report ───────────────────────────────────────────────────────────

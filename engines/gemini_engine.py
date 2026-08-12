@@ -88,23 +88,58 @@ Return ONLY valid JSON (no markdown, no explanation):
   "viral_potential": <float 0.0 to 1.0, your overall viral assessment>
 }}"""
 
-DIRECTOR_PROMPT = """You are PreViral's AI Content Director. Help this creator maximize engagement.
+DIRECTOR_FIXER_PROMPT = """You are PreViral's AI Content Director. This post needs work — help the creator fix it.
 
 Platform: {platform}
-Current Caption: {caption}
-Current Score: {current_score}/1.0 ({tier})
+Caption: {caption}
+Current Score: {current_score}/1.0 (LOW/MEDIUM — needs improvement)
 {visual_note}
 
-Return ONLY valid JSON (no markdown):
+Return ONLY valid JSON (no markdown, keep all string values SHORT — max 120 chars each):
 {{
-  "alignment_assessment": "<2 sentences: what works and what's misaligned>",
-  "rewritten_caption": "<improved version preserving creator's voice>",
-  "specific_improvements": ["<improvement 1>", "<improvement 2>", "<improvement 3>"],
-  "thumbnail_suggestion": "<one specific change to increase click-through, or 'Thumbnail looks strong'>",
-  "predicted_score_after": <float 0.0-1.0, estimated score after applying suggestions>,
-  "hook_rewrite": "<just the opening line, rewritten stronger>",
-  "best_posting_time": "<specific day and time window for {platform}>",
-  "vocabulary_suggestion": "<3-5 trending words your audience uses on {platform}>"
+  "alignment_assessment": "<2 short sentences: main weakness and opportunity>",
+  "rewritten_caption": "<improved version — preserve creator voice, add hook+CTA+hashtags>",
+  "specific_improvements": ["<fix 1 in 1 sentence>", "<fix 2 in 1 sentence>", "<fix 3 in 1 sentence>"],
+  "thumbnail_suggestion": "<one specific visual change>",
+  "predicted_score_after": <float 0.0-1.0>,
+  "hook_rewrite": "<just the new opening line>",
+  "best_posting_time": "<specific day + time for {platform}>",
+  "vocabulary_suggestion": "<3-4 trending words for this niche on {platform}>",
+  "mode": "fixer"
+}}"""
+
+DIRECTOR_OPTIMIZER_PROMPT = """You are PreViral's AI Content Director running in OPTIMIZER MODE.
+This caption already scores HIGH. Your job is NOT to rewrite it — your job is to find the marginal gains
+that no other AI can see, because you have access to platform algorithm intelligence.
+
+Platform: {platform}
+Caption: {caption}
+Current Confidence: {current_score}/1.0 (HIGH — already strong)
+{visual_note}
+
+Deliver what Claude, ChatGPT, and other AIs CANNOT:
+1. A/B hook variants — 3 alternative opening lines to split-test (different angles: curiosity / authority / story)
+2. Micro-improvements — 3 surgical word-level tweaks (not a full rewrite) that push the score higher
+3. Hashtag velocity — which hashtags to ADD (rising fast) and which to REMOVE (dying/oversaturated)
+4. Algorithm timing edge — the specific window on {platform} where THIS content type performs best
+5. Competitive gap — what the top 1% of posts in this niche do that this caption still doesn't
+
+Return ONLY valid JSON (no markdown, keep all string values SHORT — max 150 chars each):
+{{
+  "alignment_assessment": "<1-2 sentences: what is already excellent about this caption>",
+  "hook_variants": [
+    {{"variant": "<hook option A — curiosity angle>", "angle": "Curiosity"}},
+    {{"variant": "<hook option B — authority angle>", "angle": "Authority"}},
+    {{"variant": "<hook option C — story angle>", "angle": "Story"}}
+  ],
+  "micro_improvements": ["<surgical tweak 1>", "<surgical tweak 2>", "<surgical tweak 3>"],
+  "hashtags_to_add": ["#tag1", "#tag2", "#tag3"],
+  "hashtags_to_remove": ["#tag1", "#tag2"],
+  "timing_edge": "<exact day + hour + why this content type peaks then on {platform}>",
+  "competitive_gap": "<the one thing top 1% posts do that this caption still lacks>",
+  "predicted_score_after": <float 0.0-1.0, the marginal gain from applying these tweaks>,
+  "vocabulary_suggestion": "<3-4 words currently trending in this niche on {platform}>",
+  "mode": "optimizer"
 }}"""
 
 
@@ -234,10 +269,14 @@ def ai_content_director(
     image_bytes: Optional[bytes] = None,
 ) -> dict:
     """
-    AI Content Director — PreViral's flagship Gemini feature.
-    Analyzes caption + thumbnail together and returns a complete content upgrade.
+    AI Content Director — two modes:
+    FIXER (LOW/MEDIUM): Full rewrite + 3 improvements
+    OPTIMIZER (HIGH): A/B hook variants + micro-tweaks + hashtag velocity + timing edge
+    The OPTIMIZER is PreViral's differentiator vs Claude/GPT — platform algorithm intelligence.
     """
     client = _get_client()
+    is_high = current_score >= 0.60 or tier == "HIGH"
+
     fallback = {
         "alignment_assessment": "Add your GEMINI_API_KEY to enable AI Content Director.",
         "rewritten_caption": caption,
@@ -251,6 +290,7 @@ def ai_content_director(
         "hook_rewrite": caption[:80].strip(),
         "best_posting_time": "Tuesday–Thursday, 11am–1pm local time",
         "vocabulary_suggestion": "Use emotionally charged, platform-native language.",
+        "mode": "optimizer" if is_high else "fixer",
         "_gemini_used": False,
     }
 
@@ -263,13 +303,21 @@ def ai_content_director(
         "No thumbnail provided — focus on caption only."
     )
 
-    prompt = DIRECTOR_PROMPT.format(
-        platform=platform,
-        caption=caption[:2000],
-        current_score=f"{current_score:.2f}",
-        tier=tier,
-        visual_note=visual_note,
-    )
+    # Choose prompt based on confidence tier
+    if is_high:
+        prompt = DIRECTOR_OPTIMIZER_PROMPT.format(
+            platform=platform,
+            caption=caption[:2000],
+            current_score=f"{current_score:.2f}",
+            visual_note=visual_note,
+        )
+    else:
+        prompt = DIRECTOR_FIXER_PROMPT.format(
+            platform=platform,
+            caption=caption[:2000],
+            current_score=f"{current_score:.2f}",
+            visual_note=visual_note,
+        )
 
     try:
         response = client.models.generate_content(
@@ -280,8 +328,12 @@ def ai_content_director(
                 max_output_tokens=4096,
             )
         )
-        result = json.loads(_clean_json(_get_text(response)))
+        raw_text = _get_text(response) or ""
+        cleaned  = _clean_json(raw_text)
+        repaired = _repair_json(cleaned)
+        result   = json.loads(repaired)
         result["_gemini_used"] = True
+        result["mode"]         = "optimizer" if is_high else "fixer"
         return result
     except Exception as e:
         fallback["_gemini_error"] = str(e)[:100]
@@ -314,37 +366,11 @@ def health_check() -> dict:
         return {"gemini_available": False, "error": str(e)[:120], "sdk": "google-genai (new)"}
 
 
-# ── Trend Intelligence via Direct Gemini (fast, topic-aware, 15 tags) ─────────
-TREND_PROMPT = """You are a social media hashtag strategist who knows exactly what's working on each platform.
-
-Platform: {platform}
-Niche: {niche}
-Caption: {topic}
-
-Generate exactly 15 hashtags for this specific caption and niche.
-
-Rules:
-1. Read the caption carefully — suggest hashtags matching THE ACTUAL TOPIC, not just the niche
-2. trending_now: 5 hashtags currently growing in usage on {platform} for this topic
-3. stable_performers: 7 evergreen hashtags with consistent discovery value for this topic
-4. avoid: 3 oversaturated hashtags (>100M posts) that should be swapped out
-5. NO generic hashtags like #love #life #happy unless specifically relevant
-6. Include niche-specific, community-specific, and moment-specific tags
-
-Return ONLY valid JSON, no markdown:
-{{
-  "trending_now": [
-    {{"tag": "#example", "why": "why it works right now", "velocity": "high"}}
-  ],
-  "stable_performers": [
-    {{"tag": "#example", "why": "consistent discovery value"}}
-  ],
-  "avoid": [
-    {{"tag": "#example", "reason": "too saturated — X00M+ posts"}}
-  ],
-  "topic_detected": "<exact topic from the caption>",
-  "grounding_used": false
-}}"""
+# ── Trend Intelligence via Direct Gemini ─────────
+TREND_PROMPT = """You are a hashtag strategist.
+Platform: {platform} | Niche: {niche} | Topic: {topic}
+Generate 15 hashtags.
+Return JSON: {"trending_now": [{"tag": "#...", "why": "...", "velocity": "high"}], "stable_performers": [{"tag": "#...", "why": "..."}], "avoid": [{"tag": "#...", "reason": "..."}], "topic_detected": "..."}"""
 
 
 def suggest_trending_hashtags(
@@ -353,21 +379,18 @@ def suggest_trending_hashtags(
     niche: str = "general",
 ) -> dict:
     """
-    Fast Gemini hashtag intelligence — no Search Grounding (which times out).
-    Returns 15 topic-specific hashtags in 3 buckets in under 2 seconds.
+    Fast Gemini hashtag intelligence.
     """
     fallback = {
         "trending_now": [],
         "stable_performers": [
             {"tag": f"#{niche}", "why": "Core niche tag"},
             {"tag": f"#{platform}creator", "why": "Platform creator community"},
-            {"tag": f"#{niche}tips", "why": "Discovery tag for niche content"},
         ],
         "avoid": [
-            {"tag": "#viral", "reason": "Too generic — 500M+ posts, no discovery value"},
+            {"tag": "#viral", "reason": "Too generic"},
         ],
         "topic_detected": niche,
-        "grounding_used": False,
         "_gemini_used": False,
     }
 
@@ -385,7 +408,7 @@ def suggest_trending_hashtags(
             contents=prompt,
             config=types.GenerateContentConfig(
                 temperature=0.3,
-                max_output_tokens=2048,
+                max_output_tokens=4096,
             )
         )
         elapsed_ms = int((time.time() - t0) * 1000)
@@ -396,7 +419,8 @@ def suggest_trending_hashtags(
             fallback["_error"] = "No JSON in response"
             return fallback
 
-        data = json.loads(json_match.group(0))
+        repaired = _repair_json(json_match.group(0))
+        data = json.loads(repaired)
         data["_gemini_used"] = True
         data["_latency_ms"] = elapsed_ms
         return data
