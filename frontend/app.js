@@ -417,9 +417,9 @@ function renderTrending(data) {
   }
 
   card.style.display = '';
-  subtitle.textContent = grounded
-    ? `Gemini searched the web just now · Topic: ${topic}`
-    : `Based on hashtag database · Topic: ${topic}`;
+  subtitle.textContent = data._gemini_used
+    ? `Powered by Gemini · Topic: ${topic || 'general'}`
+    : `Based on hashtag database · Topic: ${topic || niche}`;
 
   let html = '';
 

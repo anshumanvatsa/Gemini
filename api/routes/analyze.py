@@ -120,21 +120,40 @@ def generate_trajectory(confidence: float, follower_count: int, platform: str,
             pass  # Fall through to heuristic
 
     # ── Heuristic fallback ─────────────────────────────────────────
-    base_reach = follower_count * 0.1
+    base_reach = max(follower_count * 0.1, 500)  # minimum 500 so chart never looks dead
     platform_mult = {
         "tiktok": 8.0, "instagram": 4.0, "youtube": 12.0,
         "twitter": 2.5, "linkedin": 1.8, "facebook": 2.0, "reddit": 3.0
     }.get(platform.lower(), 3.0)
 
     if confidence > 0.65:
+        # HIGH — growth curve: slow start, big spike day 7, slight pullback day 10
         growth = confidence * platform_mult
-        mids = [int(base_reach * 1.5), int(base_reach * growth * 2.5),
-                int(base_reach * growth * 4.0), int(base_reach * growth * 3.5)]
+        mids = [
+            int(base_reach * 1.5),
+            int(base_reach * growth * 2.5),
+            int(base_reach * growth * 5.0),
+            int(base_reach * growth * 4.2)
+        ]
+    elif confidence > 0.40:
+        # MEDIUM — plateau: rises to day 3, holds, slight drop
+        growth = confidence * platform_mult * 0.6
+        mids = [
+            int(base_reach * 1.0),
+            int(base_reach * growth * 1.8),
+            int(base_reach * growth * 1.9),
+            int(base_reach * growth * 1.5)
+        ]
     else:
-        mids = [int(base_reach * 0.6), int(base_reach * 0.8),
-                int(base_reach * 0.5), int(base_reach * 0.3)]
+        # LOW — decay curve: initial burst from followers, then drops off fast
+        mids = [
+            int(base_reach * 1.2),   # Day 1: initial follower exposure
+            int(base_reach * 0.9),   # Day 3: algorithm doesn't pick it up
+            int(base_reach * 0.5),   # Day 7: fades
+            int(base_reach * 0.25)   # Day 10: near zero organic reach
+        ]
 
-    spreads = [0.25, 0.30, 0.35, 0.40]
+    spreads = [0.20, 0.25, 0.30, 0.35]
     return [
         TrajectoryPoint(
             day=d,

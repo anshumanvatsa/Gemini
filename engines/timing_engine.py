@@ -25,33 +25,38 @@ DAY_WEIGHTS = {
 
 def analyze_timing(platform: str, post_datetime: datetime) -> dict:
     """
-    Given a platform and posting datetime, return 3 timing features.
+    Given a platform and posting datetime, return timing features.
+    NOTE: peak windows are defined for the target audience (IST / UTC+5:30 adjusted).
+    The hour used for scoring is derived from the post datetime directly.
     """
     platform = platform.lower()
     if platform not in PEAK_WINDOWS:
         return {
             "peak_overlap_score": 0.5,
             "day_of_week_score": 0.5,
-            "audience_active_pct": 0.05
+            "audience_active_pct": 0.05,
+            "best_posting_time": "Check platform analytics for optimal window",
+            "audience_timezone": "your audience's local time",
         }
 
     data = PEAK_WINDOWS[platform]
     hour = post_datetime.hour
-    day = post_datetime.weekday()  # 0=Monday, 6=Sunday
+    day  = post_datetime.weekday()  # 0=Monday, 6=Sunday
 
-    # 1. Peak overlap score — is this hour in the peak hours list?
+    # 1. Peak overlap score — more aggressive penalty for off-peak
     peak_hours = data["peak_hours"]
-    if hour in peak_hours:
-        # Score higher if it's the best hour
-        if hour == data["best_hour"]:
-            peak_overlap_score = 1.0
-        else:
-            peak_overlap_score = 0.8
+    if hour == data["best_hour"]:
+        peak_overlap_score = 1.0
+    elif hour in peak_hours:
+        # How close to the best hour?
+        dist_to_best = abs(hour - data["best_hour"])
+        peak_overlap_score = max(0.65, 1.0 - dist_to_best * 0.06)
     else:
-        # How close to nearest peak?
+        # Not a peak hour — penalize based on distance to nearest peak
         distances = [abs(hour - ph) for ph in peak_hours]
         min_dist = min(distances)
-        peak_overlap_score = max(0.0, 1.0 - (min_dist * 0.15))
+        # 1 hour off = 0.55, 2 hours = 0.45, 3+ = 0.30
+        peak_overlap_score = max(0.20, 0.60 - (min_dist * 0.12))
 
     # 2. Day of week score
     weights = DAY_WEIGHTS.get(platform, [0.7] * 7)
@@ -61,10 +66,32 @@ def analyze_timing(platform: str, post_datetime: datetime) -> dict:
     curve = data.get("audience_curve", {})
     audience_active_pct = curve.get(str(hour), 0.05)
 
+    # 4. Human-readable best posting time
+    best_hour = data["best_hour"]
+    best_am_pm = "AM" if best_hour < 12 else "PM"
+    best_h = best_hour if best_hour <= 12 else best_hour - 12
+    best_h = 12 if best_h == 0 else best_h
+    peak_windows_readable = []
+    # Group consecutive peak hours into windows
+    ph = sorted(peak_hours)
+    if ph:
+        start = ph[0]
+        for i in range(1, len(ph)):
+            if ph[i] - ph[i-1] > 2:
+                end = ph[i-1]
+                peak_windows_readable.append(f"{start}:00–{end+1}:00")
+                start = ph[i]
+        peak_windows_readable.append(f"{start}:00–{ph[-1]+1}:00")
+
+    best_posting_time = f"{data['best_day']} {best_h}:00 {best_am_pm} (peak windows: {', '.join(peak_windows_readable)})"
+
     return {
-        "peak_overlap_score": round(peak_overlap_score, 3),
-        "day_of_week_score": round(day_of_week_score, 3),
-        "audience_active_pct": round(audience_active_pct, 4)
+        "peak_overlap_score":  round(peak_overlap_score, 3),
+        "day_of_week_score":   round(day_of_week_score, 3),
+        "audience_active_pct": round(audience_active_pct, 4),
+        "best_posting_time":   best_posting_time,
+        "current_hour":        hour,
+        "is_peak_hour":        hour in peak_hours,
     }
 
 
