@@ -75,10 +75,15 @@ SUGGESTION_TEMPLATES = {
         )
     },
     "trending_hashtag_count": {
-        "increase": lambda delta: (
-            f"None of your hashtags are currently trending in this niche. "
-            f"Swap in 2-3 currently rising hashtags from the panel below — these have the "
-            f"highest chance of getting algorithmic pickup right now."
+        "increase": lambda delta, fv=None: (
+            (
+                f"Add hashtags to your caption — you have none right now. "
+                f"For {fv.get('_platform','Instagram')} in this niche, 5-10 targeted hashtags can "
+                f"increase reach by 40-60%. See the Hashtag Panel below for the best ones."
+            ) if (fv and fv.get('hashtag_count_nlp', fv.get('hashtag_count', 0)) == 0) else (
+                f"None of your hashtags are gaining traction right now. "
+                f"Swap 2-3 of your existing ones with currently rising hashtags from the panel below."
+            )
         )
     },
     "face_count": {
@@ -176,7 +181,10 @@ def generate_suggestions(
     for gap, feature, direction in feature_gaps[:max_suggestions]:
         template = SUGGESTION_TEMPLATES.get(feature, {}).get(direction)
         if template:
-            suggestion_text = template(gap)
+            try:
+                suggestion_text = template(gap, fv=feature_vector)
+            except TypeError:
+                suggestion_text = template(gap)
             impact_pct = min(35, int(gap * 80))  # Estimate impact %
             suggestions.append({
                 "feature": feature,

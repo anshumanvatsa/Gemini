@@ -357,7 +357,8 @@ async def analyze_post(
         **vision_features,
         **timing_features,
         "follower_count": follower_count / 1_000_000,  # Normalize
-        "avg_engagement_rate": avg_engagement_rate
+        "avg_engagement_rate": avg_engagement_rate,
+        "_platform": platform,
     }
 
     # Run LightGBM prediction
@@ -479,6 +480,12 @@ async def ai_director(
     niche: Optional[str] = Form("tech"),
     media: Optional[UploadFile] = File(None)
 ):
+    start_time = time.time()
+    dt         = datetime.now()
+
+    image_bytes = None
+    if media and media.filename:
+        image_bytes = await media.read()
 
     loop = asyncio.get_event_loop()
 
