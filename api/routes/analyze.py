@@ -340,15 +340,20 @@ async def analyze_post(
         nlp_task, timing_task, hashtag_task, vision_task, gemini_task, trend_task
     )
 
-    # Merge Gemini features into NLP (Gemini wins on shared keys if available)
+    # ── Architecture: VADER → LightGBM, Gemini → AI Director only ──────────────
+    # LightGBM was trained on VADER-computed NLP features (F1=0.8489).
+    # Merging Gemini NLP values into LightGBM features causes distribution mismatch
+    # because Gemini scores different scales than VADER (e.g. sentiment -1 to 1 vs 0 to 1).
+    # Solution: VADER is the ONLY source of LightGBM features. Gemini supplements the
+    # UI display (hook_strength, visual_alignment, viral_potential) but NEVER touches
+    # the feature vector that feeds the prediction model.
     _gemini_extras = {k: v for k, v in gemini_nlp.items() if k.startswith('_gemini_')}
-    _gemini_core   = {k: v for k, v in gemini_nlp.items() if not k.startswith('_gemini_')}
-    if _gemini_core:
-        nlp_features = {**nlp_features, **_gemini_core}
+    # Gemini display-only extras — shown in UI, NOT fed to LightGBM
     nlp_features["gemini_hook_strength"]    = _gemini_extras.get("_gemini_hook_strength", 0.5)
     nlp_features["gemini_visual_alignment"] = _gemini_extras.get("_gemini_visual_alignment", 0.5)
     nlp_features["gemini_viral_potential"]  = _gemini_extras.get("_gemini_viral_potential", 0.5)
     nlp_features["gemini_used"]             = bool(_gemini_extras.get("_gemini_used", False))
+
 
     # Build unified feature vector
     feature_vector = {
@@ -478,6 +483,7 @@ async def ai_director(
     follower_count: Optional[int] = Form(1000),
     avg_engagement_rate: Optional[float] = Form(0.03),
     niche: Optional[str] = Form("tech"),
+    directives: Optional[str] = Form(None),
     media: Optional[UploadFile] = File(None)
 ):
     start_time = time.time()
@@ -536,10 +542,10 @@ async def ai_director(
     for iteration in range(1, 3):
         score_pct = round(current_score * 100)
 
-        # Call Gemini with the NUMERIC score so it knows exactly how far from HIGH
+        # Call Gemini with the NUMERIC score + DICE-ML directives
         result = await loop.run_in_executor(
             None, ai_content_director,
-            current_caption, platform, current_score, orig_prediction, image_bytes
+            current_caption, platform, current_score, orig_prediction, image_bytes, directives
         )
 
         # Extract the rewritten caption from Gemini's output

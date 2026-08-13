@@ -511,6 +511,15 @@ async function triggerAIDirector(caption, platform, confidence, prediction) {
   fd.append('follower_count', document.getElementById('followerCount').value || 10000);
   if (mediaFile) fd.append('media', mediaFile);
 
+  // ── Send DICE-ML directives so Gemini prescribes based on actual diagnosis ──
+  // lastResult.suggestions = the DICE-ML counterfactual suggestions from the analysis
+  if (lastResult && lastResult.suggestions && lastResult.suggestions.length > 0) {
+    const topDirectives = lastResult.suggestions.slice(0, 3)
+      .map((s, i) => `${i + 1}. ${s.suggestion}`)
+      .join('\n');
+    fd.append('directives', topDirectives);
+  }
+
   try {
     const res = await fetch(`${API_BASE}/api/v1/ai-director`, { method: 'POST', body: fd });
     if (!res.ok) throw new Error('HTTP ' + res.status);

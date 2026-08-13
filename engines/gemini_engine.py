@@ -88,20 +88,23 @@ Return ONLY valid JSON (no markdown, no explanation):
   "viral_potential": <float 0.0 to 1.0, your overall viral assessment>
 }}"""
 
-DIRECTOR_FIXER_PROMPT = """You are PreViral's AI Content Director. This post needs work — help the creator fix it.
+DIRECTOR_FIXER_PROMPT = """You are PreViral's AI Content Director. You receive BOTH the caption text AND the thumbnail image in this single multimodal call. Analyze them together.
 
 Platform: {platform}
 Caption: {caption}
 LightGBM Score: {score_pct} out of 100 — needs to reach 75+ to be HIGH
 {visual_note}
 
-The score is {score_pct}/100. Your rewrite must specifically address what is keeping it below 75.
+Diagnosis from our ML model (DICE-ML counterfactuals — these are the SPECIFIC issues to fix):
+{directives_section}
+
+Your rewrite must address the diagnosed issues above. Be specific, not generic.
 Return ONLY valid JSON (no markdown, keep all string values SHORT — max 120 chars each):
 {{
-  "alignment_assessment": "<2 short sentences: main weakness and opportunity>",
-  "rewritten_caption": "<improved version — preserve creator voice, add hook+CTA+hashtags>",
-  "specific_improvements": ["<fix 1 in 1 sentence>", "<fix 2 in 1 sentence>", "<fix 3 in 1 sentence>"],
-  "thumbnail_suggestion": "<one specific visual change>",
+  "alignment_assessment": "<2 short sentences: how well caption and thumbnail work together>",
+  "rewritten_caption": "<improved version — preserves creator voice, adds hook+CTA+hashtags, fixes diagnosed issues>",
+  "specific_improvements": ["<fix 1 addressing a diagnosed issue>", "<fix 2>", "<fix 3>"],
+  "thumbnail_suggestion": "<one specific visual change based on multimodal analysis>",
   "predicted_score_after": <float 0.0-1.0>,
   "hook_rewrite": "<just the new opening line>",
   "best_posting_time": "<specific day + time for {platform}>",
@@ -110,6 +113,7 @@ Return ONLY valid JSON (no markdown, keep all string values SHORT — max 120 ch
 }}"""
 
 DIRECTOR_OPTIMIZER_PROMPT = """You are PreViral's AI Content Director running in OPTIMIZER MODE.
+You receive BOTH the caption text AND the thumbnail image in this single multimodal call. Analyze them together.
 This caption already scores HIGH. Your job is NOT to rewrite it — find the marginal gains
 that platform algorithm intelligence reveals.
 
@@ -117,6 +121,9 @@ Platform: {platform}
 Caption: {caption}
 LightGBM Score: {score_pct} out of 100 (already HIGH — push toward 95+)
 {visual_note}
+
+Fine-tuning signals from our ML model:
+{directives_section}
 
 Deliver what Claude, ChatGPT, and other AIs CANNOT:
 1. A/B hook variants — 3 alternative opening lines (curiosity / authority / story angles)
@@ -127,7 +134,7 @@ Deliver what Claude, ChatGPT, and other AIs CANNOT:
 
 Return ONLY valid JSON (no markdown, keep all string values SHORT — max 150 chars each):
 {{
-  "alignment_assessment": "<1-2 sentences: what is already excellent about this caption>",
+  "alignment_assessment": "<1-2 sentences: what is already excellent, and how thumbnail and caption work together>",
   "hook_variants": [
     {{"variant": "<hook option A — curiosity angle>", "angle": "Curiosity"}},
     {{"variant": "<hook option B — authority angle>", "angle": "Authority"}},
@@ -164,7 +171,12 @@ def _clean_json(raw: str) -> str:
 
 
 def _build_contents(prompt: str, image_bytes: Optional[bytes] = None) -> list:
-    """Build content parts list for Gemini request."""
+    """
+    Build a single multimodal Gemini request containing BOTH image and text.
+    This is a genuine one-call multimodal fusion — not two separate API calls.
+    Gemini receives image bytes + caption text simultaneously in one request,
+    enabling cross-modal analysis that neither text-only nor image-only can produce.
+    """
     parts = []
     if image_bytes:
         parts.append(types.Part.from_bytes(
@@ -268,6 +280,7 @@ def ai_content_director(
     current_score: float,
     tier: str,
     image_bytes: Optional[bytes] = None,
+    directives: Optional[str] = None,
 ) -> dict:
     """
     AI Content Director — two modes:
@@ -305,6 +318,12 @@ def ai_content_director(
         "No thumbnail provided — focus on caption only."
     )
 
+    # Format DICE-ML directives for the prompt
+    if directives and directives.strip():
+        directives_section = directives.strip()
+    else:
+        directives_section = "No specific directives provided — use your own analysis."
+
     # Choose prompt based on confidence tier
     if is_high:
         prompt = DIRECTOR_OPTIMIZER_PROMPT.format(
@@ -312,6 +331,7 @@ def ai_content_director(
             caption=caption[:2000],
             score_pct=score_pct,
             visual_note=visual_note,
+            directives_section=directives_section,
         )
     else:
         prompt = DIRECTOR_FIXER_PROMPT.format(
@@ -319,6 +339,7 @@ def ai_content_director(
             caption=caption[:2000],
             score_pct=score_pct,
             visual_note=visual_note,
+            directives_section=directives_section,
         )
 
     try:
