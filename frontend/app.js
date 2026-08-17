@@ -714,49 +714,42 @@ async function triggerAIDirector(caption, platform, confidence, prediction) {
 function renderDirector(d, originalCaption) {
   const body = document.getElementById('directorBody');
   const mode  = d.mode || (d.hook_variants ? 'optimizer' : 'fixer');
-  const currentConf  = d.current_confidence || 0;
-  const afterConf    = d.predicted_score_after || Math.min(currentConf + 0.08, 0.98);
-  const trail        = d.iteration_trail || [];
-  const origScore    = trail[0]?.score || Math.round(currentConf * 100);
-  const bestIterScore = trail.length > 1 ? Math.max(...trail.slice(1).map(t => t.score)) : 0;
-  // Use LightGBM actual score lift if positive, otherwise use Gemini estimate as secondary
-  const lgbmLift     = bestIterScore - origScore;
-  const geminiLift   = Math.round((afterConf - currentConf) * 100);
-  const liftPct      = lgbmLift > 0 ? lgbmLift : 0;   // never show negative lift
-  const bestIter     = d.best_iteration || null;
-  // Flag contradiction: Gemini says +big% but LightGBM says score dropped
-  const geminiOverclaiming = geminiLift > 10 && lgbmLift < 0;
+  const trail = d.iteration_trail || [];
+  // beatOriginal / recommended / alternative come from the backend's own best-of-N
+  // pick — this is the single source of truth for what "won," so the UI never
+  // shows a rewrite as the winner when the ML model actually scored it lower.
+  const beatOriginal = !!d.beat_original;
+  const recommended  = d.recommended || { source: 'original', caption: originalCaption, score_pct: Math.round((d.current_confidence || 0) * 100), delta_pct: 0 };
+  const alternative  = d.alternative || null;
+  const liftPct      = beatOriginal ? Math.max(0, recommended.delta_pct || 0) : 0;
+  const afterConf     = recommended.score_pct / 100;
 
-  // -- Iteration Trail --
+  // -- Iteration Trail (collapsed by default — process detail, not the headline) --
   let trailHtml = '';
   if (trail.length > 1) {
-    const origScore  = trail[0]?.score || 0;
-    const bestScore  = Math.max(...trail.slice(1).map(t => t.score));
-    const didImprove = bestScore > origScore;
+    const origScore = trail[0]?.score || 0;
+    const bestScore = Math.max(...trail.map(t => t.score));
     trailHtml = `
-    <div class="iter-trail">
-      <div class="iter-trail-label">Model-Validated Score Journey</div>
-      <div class="iter-trail-steps">
-        ${trail.map((t, i) => {
-          const isOrig  = i === 0;
-          // BEST badge only if this iteration beat the original
-          const isBest  = !isOrig && t.score === bestScore && didImprove;
-          const col     = t.score >= 75 ? '#10b981' : t.score >= 45 ? '#f59e0b' : '#ef4444';
-          const delta   = !isOrig ? (t.score > origScore ? `<span class="iter-delta up">+${t.score - origScore}</span>` : t.score < origScore ? `<span class="iter-delta down">${t.score - origScore}</span>` : '') : '';
-          return `
-          <div class="iter-step ${isBest ? 'iter-best' : ''}">
-            <div class="iter-label">${escHtml(t.label)}</div>
-            <div class="iter-score" style="color:${col}">${t.score}${delta}</div>
-            ${isBest ? '<div class="iter-best-badge">BEST</div>' : ''}
-          </div>
-          ${i < trail.length - 1 ? '<div class="iter-arrow">→</div>' : ''}`;
-        }).join('')}
+    <details class="iter-details">
+      <summary>Show iteration details (${trail.length} steps)</summary>
+      <div class="iter-trail">
+        <div class="iter-trail-steps">
+          ${trail.map((t, i) => {
+            const isOrig = i === 0;
+            const isBest = t.score === bestScore && (beatOriginal ? !isOrig : isOrig);
+            const col    = t.score >= 75 ? '#10b981' : t.score >= 45 ? '#f59e0b' : '#ef4444';
+            const delta  = !isOrig ? (t.score > origScore ? `<span class="iter-delta up">+${t.score - origScore}</span>` : t.score < origScore ? `<span class="iter-delta down">${t.score - origScore}</span>` : '') : '';
+            return `
+            <div class="iter-step ${isBest ? 'iter-best' : ''}">
+              <div class="iter-label">${escHtml(t.label)}</div>
+              <div class="iter-score" style="color:${col}">${t.score}${delta}</div>
+              ${isBest ? '<div class="iter-best-badge">BEST</div>' : ''}
+            </div>
+            ${i < trail.length - 1 ? '<div class="iter-arrow">→</div>' : ''}`;
+          }).join('')}
+        </div>
       </div>
-      ${didImprove
-        ? `<div class="iter-summary">+${bestScore - origScore} points gained. Best rewrite selected.</div>`
-        : `<div class="iter-summary iter-summary-warn">Gemini's rewrites scored lower on our ML model — the original caption is stronger for the algorithm. Gemini suggestions shown for creativity only.</div>`
-      }
-    </div>`;
+    </details>`;
   }
 
   if (mode === 'optimizer') {
@@ -852,22 +845,45 @@ function renderDirector(d, originalCaption) {
 
   } else {
     // ── FIXER MODE: low/medium — full rewrite ─────────────────────────────────
-    const rewritten = d.rewritten_caption || originalCaption;
-    body.innerHTML = `
-      ${trailHtml}
+    // Which caption wins is decided by the backend's actual LightGBM score
+    // (d.beat_original), never assumed — so the ✅ never lands on a rewrite that
+    // scored lower than what it's being compared against.
+    const compareHtml = beatOriginal ? `
       <div class="caption-compare">
         <div class="caption-box">
-          <div class="caption-box-label before">❌ Original</div>
+          <div class="caption-box-label before">Original — ${trail[0]?.score ?? ''}%</div>
           <div class="caption-text before">${escHtml(originalCaption)}</div>
         </div>
         <div class="caption-box">
-          <div class="caption-box-label after">✅ Gemini Rewrite</div>
+          <div class="caption-box-label rec">✅ Recommended — ${recommended.score_pct}%</div>
           <div class="caption-text after" style="position:relative">
-            ${escHtml(rewritten)}
-            <button class="copy-btn" onclick="copyText(${JSON.stringify(rewritten)}, this)">Copy</button>
+            ${escHtml(recommended.caption)}
+            <button class="copy-btn" onclick="copyText(${JSON.stringify(recommended.caption)}, this)">Copy</button>
           </div>
         </div>
+      </div>` : `
+      <div class="caption-compare">
+        <div class="caption-box">
+          <div class="caption-box-label rec">✅ Recommended — Keep Original (${recommended.score_pct}%)</div>
+          <div class="caption-text after" style="position:relative">
+            ${escHtml(originalCaption)}
+            <button class="copy-btn" onclick="copyText(${JSON.stringify(originalCaption)}, this)">Copy</button>
+          </div>
+        </div>
+        ${alternative ? `
+        <div class="caption-box">
+          <div class="caption-box-label alt">Gemini's Creative Alternative — ${alternative.score_pct}%</div>
+          <div class="caption-text alt" style="position:relative">
+            ${escHtml(alternative.caption)}
+            <button class="copy-btn" onclick="copyText(${JSON.stringify(alternative.caption)}, this)">Copy</button>
+          </div>
+        </div>` : ''}
       </div>
+      ${alternative ? `<div class="alt-note">${escHtml(alternative.note)}</div>` : ''}`;
+
+    body.innerHTML = `
+      ${trailHtml}
+      ${compareHtml}
 
       ${d.hook_rewrite ? `
       <div class="insight-row">
@@ -914,15 +930,8 @@ function renderDirector(d, originalCaption) {
         <div class="lift-arrow">→</div>
         <div>
           <div class="lift-label">New predicted confidence</div>
-          <div class="lift-val">${Math.round((origScore/100 + liftPct/100) * 100)}%</div>
+          <div class="lift-val">${recommended.score_pct}%</div>
         </div>
-      </div>` : geminiOverclaiming ? `
-      <div class="score-lift score-lift-warn">
-        <span style="font-size:13px;color:var(--text-sub)">
-          ⚠️ Gemini estimates +${geminiLift}% lift, but our LightGBM model scored the rewrite lower.
-          The rewrite may be strong creatively but uses niche vocabulary outside the model's training distribution.
-          Use your judgment — apply the suggestions that feel right for your audience.
-        </span>
       </div>` : ''}
     `;
   }

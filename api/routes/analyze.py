@@ -70,6 +70,12 @@ CURVE_SHAPES = {
     "topical_spike":  [1.00, 0.22, 0.05, 0.02],  # news/reactive video: subscriber+notification driven,
                                                   # decays hard once the topic goes stale — calibrated against
                                                   # a real 122K-sub channel: 42K day-1 views, ~70K lifetime
+    "mega_creator_spike": [1.00, 0.35, 0.10, 0.05],  # mega channel (1M+ subs): massive built-in day-1 demand
+                                                  # PLUS algorithmic trust means YouTube front-loads distribution
+                                                  # instead of gradually testing it — peaks day 1 regardless of
+                                                  # topic. Calibrated against a real 59M-sub channel: ~14.5M
+                                                  # day-1 views trending toward 50-60M+ over the following month.
+    "mega_shorts_spike": [1.00, 0.55, 0.20, 0.10],  # same day-1-dominant logic, applied to Shorts
     "shorts_spike":   [0.85, 1.00, 0.55, 0.30],  # Shorts feed algorithm peaks ~day 2-3, decays after
     "single_day":     [1.00, 0.05, 0.02, 0.01],  # community posts / Stories — visibility ends after day 1
     "explore_pickup": [0.65, 1.00, 0.70, 0.45],  # Reel picked up by Explore after strong early engagement
@@ -115,7 +121,18 @@ def _is_topical(text: str) -> bool:
     return bool(_TOPICAL_RE.search(text or ""))
 
 
-def _resolve_trajectory_profile(platform: str, content_type: str, tier: str, is_topical: bool):
+# A channel this large has already earned YouTube's algorithmic trust and has a
+# massive built-in day-1 audience (subscriber notifications alone dwarf what a
+# mid-size channel could ever reach) — so distribution front-loads onto day 1
+# regardless of whether the content is "topical." This overrides the topical vs.
+# evergreen split below, which was calibrated on a 122K-sub channel and doesn't
+# hold once a channel is this big. Threshold, not a continuous curve — there's a
+# step at 1M subs rather than a smooth blend; fine for now, worth smoothing later.
+YOUTUBE_MEGA_THRESHOLD = 1_000_000
+
+
+def _resolve_trajectory_profile(platform: str, content_type: str, tier: str,
+                                 is_topical: bool, follower_count: int = 0):
     """
     Picks the (curve_shape, reach_cap_fraction) for a platform + content type + tier.
 
@@ -130,13 +147,19 @@ def _resolve_trajectory_profile(platform: str, content_type: str, tier: str, is_
     """
     platform = (platform or "").lower()
     content_type = (content_type or "").lower()
+    is_mega = platform == "youtube" and follower_count >= YOUTUBE_MEGA_THRESHOLD
 
     if platform == "youtube":
         if content_type == "shorts":
+            if is_mega:
+                return CURVE_SHAPES["mega_shorts_spike"], {"HIGH": 0.35, "MEDIUM": 0.18, "LOW": 0.07}[tier]
             return CURVE_SHAPES["shorts_spike"], {"HIGH": 0.55, "MEDIUM": 0.28, "LOW": 0.10}[tier]
         if content_type == "community":
             return CURVE_SHAPES["single_day"], {"HIGH": 0.15, "MEDIUM": 0.08, "LOW": 0.03}[tier]
-        # long-form video (default): evergreen vs topical/reactive content
+        # long-form video (default): mega-channel day-1 dominance beats the
+        # topical vs. evergreen split — a 59M-sub channel front-loads either way
+        if is_mega:
+            return CURVE_SHAPES["mega_creator_spike"], {"HIGH": 0.28, "MEDIUM": 0.15, "LOW": 0.06}[tier]
         if is_topical:
             return CURVE_SHAPES["topical_spike"], {"HIGH": 0.38, "MEDIUM": 0.20, "LOW": 0.08}[tier]
         return CURVE_SHAPES["slow_build"], {"HIGH": 0.30, "MEDIUM": 0.15, "LOW": 0.06}[tier]
@@ -229,7 +252,9 @@ def generate_trajectory(prediction: str, follower_count: int, platform: str,
     """
     tier = prediction if prediction in ("HIGH", "MEDIUM", "LOW") else "MEDIUM"
     caption = (feature_vector or {}).get("caption", "")
-    shape, cap_fraction = _resolve_trajectory_profile(platform, content_type, tier, _is_topical(caption))
+    shape, cap_fraction = _resolve_trajectory_profile(
+        platform, content_type, tier, _is_topical(caption), follower_count
+    )
     ceiling = max(follower_count * cap_fraction, 150)
 
     if feature_vector:
@@ -608,11 +633,7 @@ async def ai_director(
     orig_prediction, orig_confidence = await _score(caption)
     orig_score_pct = round(orig_confidence * 100)
 
-    iteration_trail = [{"label": "Original", "score": orig_score_pct, "caption": caption}]
-    best_result     = None
-    best_score      = orig_confidence
-    current_caption = caption
-    current_score   = orig_confidence
+    iteration_trail = [{"label": "Original", "score": orig_score_pct, "caption": caption, "prediction": orig_prediction}]
 
     if not GEMINI_ENGINE_AVAILABLE:
         return {
@@ -628,26 +649,31 @@ async def ai_director(
                 "Use 3-5 niche hashtags your audience follows."
             ],
             "iteration_trail": iteration_trail,
+            "beat_original": False,
+            "recommended": {
+                "source": "original", "caption": caption, "prediction": orig_prediction,
+                "score_pct": orig_score_pct, "delta_pct": 0,
+            },
+            "alternative": None,
             "processing_time_ms": round((time.time() - start_time) * 1000, 1),
         }
 
-    # ── 2-iteration model-validated loop ──────────────────────────────────────
-    for iteration in range(1, 3):
-        score_pct = round(current_score * 100)
+    # ── 2-iteration model-validated loop ────────────────────────────────────────
+    # Every iteration's result is scored honestly and kept, so we can pick the true
+    # best candidate afterward (see `candidates` below) instead of guessing mid-loop
+    # or — as the old version did — falling back to a *fresh, ungraded* Gemini call
+    # when nothing beat the original and mislabeling it with the original's score.
+    current_caption = caption
+    current_score   = orig_confidence
+    candidates      = []  # [{result, confidence, prediction, caption, iter_num}, ...]
 
-        # Call Gemini with the NUMERIC score + DICE-ML directives
+    for iteration in range(1, 3):
         result = await loop.run_in_executor(
             None, ai_content_director,
             current_caption, platform, current_score, orig_prediction, image_bytes, directives
         )
+        rewritten = result.get("rewritten_caption") or current_caption  # fixer mode has a rewrite; optimizer mode doesn't
 
-        # Extract the rewritten caption from Gemini's output
-        rewritten = (
-            result.get("rewritten_caption")          # fixer mode
-            or current_caption                        # optimizer mode (no full rewrite)
-        )
-
-        # Score the rewrite with LightGBM
         iter_prediction, iter_confidence = await _score(rewritten)
         iter_score_pct = round(iter_confidence * 100)
 
@@ -657,16 +683,11 @@ async def ai_director(
             "caption": rewritten,
             "prediction": iter_prediction,
         })
+        candidates.append({
+            "result": result, "confidence": iter_confidence,
+            "prediction": iter_prediction, "caption": rewritten, "iter_num": iteration,
+        })
 
-        # Track best — keep whichever iteration scores highest
-        if iter_confidence > best_score:
-            best_score  = iter_confidence
-            best_result = result
-            best_result["rewritten_caption"] = rewritten
-            best_result["_iter_best"]        = iteration
-            best_result["_iter_score"]       = iter_score_pct
-
-        # Feed the rewrite into the next iteration
         current_caption = rewritten
         current_score   = iter_confidence
 
@@ -674,22 +695,51 @@ async def ai_director(
         if iter_prediction == "HIGH" and iter_confidence >= 0.75:
             break
 
-    # Fallback if both iterations scored lower than original
-    if best_result is None:
-        best_result = await loop.run_in_executor(
-            None, ai_content_director,
-            caption, platform, orig_confidence, orig_prediction, image_bytes
-        )
+    # The best-scoring iteration, whether or not it actually beat the original —
+    # this becomes the shown "creative alternative" when nothing wins outright.
+    best_candidate = max(candidates, key=lambda c: c["confidence"]) if candidates else None
+    beat_original  = bool(best_candidate and best_candidate["confidence"] > orig_confidence)
+
+    if beat_original:
+        recommended = {
+            "source": "rewrite", "caption": best_candidate["caption"],
+            "prediction": best_candidate["prediction"],
+            "score_pct": round(best_candidate["confidence"] * 100),
+        }
+        director_payload = best_candidate["result"]
+        alternative = None
+    else:
+        recommended = {
+            "source": "original", "caption": caption,
+            "prediction": orig_prediction, "score_pct": orig_score_pct,
+        }
+        director_payload = best_candidate["result"] if best_candidate else {}
+        alternative = {
+            "caption": best_candidate["caption"],
+            "score_pct": round(best_candidate["confidence"] * 100),
+            "prediction": best_candidate["prediction"],
+            "note": (
+                "Gemini's rewrite scored lower on our algorithmic-fit model — this usually happens "
+                "when stylistic choices (trending slang, unconventional structure) fall outside the "
+                "caption patterns our model was trained on. We recommend keeping your original "
+                "caption; here's Gemini's creative alternative if you want a different tone."
+            ),
+        } if best_candidate else None
+    recommended["delta_pct"] = recommended["score_pct"] - orig_score_pct
 
     return {
         "current_prediction":  orig_prediction,
         "current_confidence":  round(orig_confidence, 3),
         "platform":            platform,
-        "gemini_used":         best_result.get("_gemini_used", False),
+        "gemini_used":         director_payload.get("_gemini_used", False) if director_payload else False,
         "iteration_trail":     iteration_trail,
-        "best_iteration":      best_result.get("_iter_best", 1),
-        "best_score_pct":      best_result.get("_iter_score", orig_score_pct),
-        **{k: v for k, v in best_result.items() if not k.startswith("_")},
+        "beat_original":       beat_original,
+        "recommended":         recommended,
+        "alternative":         alternative,
+        "best_iteration":      best_candidate["iter_num"] if best_candidate else None,
+        "best_score_pct":      round(best_candidate["confidence"] * 100) if best_candidate else orig_score_pct,
+        **{k: v for k, v in (director_payload or {}).items() if not k.startswith("_") and k != "rewritten_caption"},
+        "rewritten_caption":   recommended["caption"],
         "processing_time_ms":  round((time.time() - start_time) * 1000, 1),
     }
 
