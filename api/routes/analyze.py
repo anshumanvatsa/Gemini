@@ -59,164 +59,120 @@ def _load_lstm():
         return False
 
 
-def _cap_trajectory_to_reach(points: list, follower_count: int, confidence: float) -> list:
+CURVE_SHAPES = {
+    "slow_build":    [0.35, 0.65, 1.00, 0.85],  # rises to a day-7 peak, slight pullback
+    "variable":      [0.45, 0.70, 1.00, 0.80],  # recommendation-engine driven, can spike late
+    "fast_spike":    [1.00, 0.55, 0.30, 0.20],  # push to a seed audience, decays if it doesn't expand
+    "instant_decay": [1.00, 0.15, 0.05, 0.02],  # ~90% of impressions land in the first hours
+    "peak_48h":      [0.80, 1.00, 0.35, 0.15],  # peaks around day 2-3, decays sharply after
+    "suppressed":    [0.60, 0.40, 0.25, 0.15],  # organic reach throttled from the start
+}
+
+# Each platform's algorithm distributes content differently, so a single curve
+# shape scaled only by a magnitude constant (the old approach) can't be right for
+# all of them — a front-loaded platform like Twitter and a slow-build one like
+# YouTube don't just differ in size, they differ in shape. `reach_cap` bounds the
+# curve's peak as a fraction of follower_count per confidence tier, calibrated to
+# typical organic reach for that platform — not to the LSTM's YouTube-Trending-only
+# training distribution.
+PLATFORM_PROFILES = {
+    "youtube":   {"curve": "slow_build",    "reach_cap": {"HIGH": 0.30, "MEDIUM": 0.15, "LOW": 0.06}},
+    "tiktok":    {"curve": "variable",      "reach_cap": {"HIGH": 0.35, "MEDIUM": 0.20, "LOW": 0.08}},
+    "instagram": {"curve": "fast_spike",    "reach_cap": {"HIGH": 0.20, "MEDIUM": 0.12, "LOW": 0.05}},
+    "twitter":   {"curve": "instant_decay", "reach_cap": {"HIGH": 0.12, "MEDIUM": 0.08, "LOW": 0.04}},
+    "linkedin":  {"curve": "peak_48h",      "reach_cap": {"HIGH": 0.10, "MEDIUM": 0.06, "LOW": 0.03}},
+    "facebook":  {"curve": "suppressed",    "reach_cap": {"HIGH": 0.08, "MEDIUM": 0.05, "LOW": 0.02}},
+    "reddit":    {"curve": "fast_spike",    "reach_cap": {"HIGH": 0.25, "MEDIUM": 0.14, "LOW": 0.05}},
+}
+DEFAULT_PROFILE = {"curve": "slow_build", "reach_cap": {"HIGH": 0.15, "MEDIUM": 0.10, "LOW": 0.04}}
+
+
+def _lstm_signal_multiplier(feature_vector: dict) -> float:
     """
-    Bounds a trajectory to a realistic reach ceiling given the account's follower count.
+    Nudges trajectory magnitude within a bounded range using the LSTM's text signal.
 
-    The LSTM was trained on YouTube Trending data, so its raw output reflects videos
-    that reached millions of views by definition — it has no signal for a typical
-    sub-100K-follower account. Without this cap, predictions can land 15-20x higher
-    than what a creator at that follower count would actually see. This scales the
-    whole curve down proportionally (preserving its shape) rather than flattening
-    the peak, so the trajectory still tells the "grows then plateaus/decays" story —
-    just bounded to plausible reach for the account size.
+    The LSTM was trained exclusively on YouTube Trending data, so its raw output is
+    only meaningful as a *relative* signal (this caption reads stronger/weaker than
+    another) — not as an absolute view count for an arbitrary platform and follower
+    count. Clamping to [0.75, 1.30] lets it tilt the estimate without ever
+    overriding the platform/follower-based reach ceiling in generate_trajectory.
     """
-    if confidence > 0.65:
-        ceiling = follower_count * 0.30
-    elif confidence > 0.40:
-        ceiling = follower_count * 0.15
-    else:
-        ceiling = follower_count * 0.06
-    ceiling = max(ceiling, 200)  # keep the chart from looking dead for tiny accounts
+    if not _load_lstm():
+        return 1.0
+    try:
+        import torch, numpy as _np, re
+        from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
+        _v = SentimentIntensityAnalyzer()
+        text = feature_vector.get("caption", "")[:300]
+        s = _v.polarity_scores(text)
+        feats = _np.array([[
+            s['compound'], max(0, s['compound']), abs(s['compound']),
+            s['pos'], s['neg'],
+            min(len(text), 300) / 300,
+            float('?' in text), float('!' in text),
+            min(text.count('!'), 5) / 5,
+            float(bool(re.search(r'how to|tutorial', text, re.I))),
+            float(bool(re.search(r'best|top|worst', text, re.I))),
+            float(bool(re.search(r'\d+', text))),
+            float(bool(re.search(r'you|your|we', text, re.I))),
+            float(bool(re.search(r'secret|hack|never|always', text, re.I))),
+            float(bool(re.search(r'shorts|short|quick', text, re.I))),
+            float(bool(re.search(r'full|complete', text, re.I))),
+            float(bool(re.search(r'vs|versus', text, re.I))),
+            float(bool(re.search(r'new|first|exclusive', text, re.I))),
+            min(len(re.findall(r'[A-Z]', text[:50])), 10) / 10,
+            min(len(text.split()), 20) / 20,
+        ]], dtype=_np.float32)
 
-    max_mid = max((p.mid for p in points), default=0)
-    if max_mid <= ceiling:
-        return points
+        X_scaled = _lstm_scaler.transform(feats)
+        with torch.no_grad():
+            pred_norm = _lstm_model(torch.tensor(X_scaled, dtype=torch.float32)).numpy()[0]
+        pred_log_views = pred_norm * _lstm_tmax
+        raw_signal = float(_np.mean(_np.expm1(pred_log_views)))
 
-    scale = ceiling / max_mid
-    return [
-        TrajectoryPoint(
-            day=p.day,
-            low=max(0, int(p.low * scale)),
-            mid=max(1, int(p.mid * scale)),
-            high=max(1, int(p.high * scale)),
-        )
-        for p in points
-    ]
+        # Compress the huge YouTube-Trending-scale output down to a bounded tilt.
+        log_signal = _np.log1p(raw_signal)
+        norm = min(1.0, max(0.0, (log_signal - 8.0) / 8.0))
+        return 0.75 + norm * 0.55  # [0.75, 1.30]
+    except Exception:
+        return 1.0
 
 
-def generate_trajectory(confidence: float, follower_count: int, platform: str,
+def generate_trajectory(prediction: str, follower_count: int, platform: str,
                         feature_vector: dict = None) -> list:
     """
-    Generates a 4-point impression trajectory.
-    Uses the trained LSTM when available; falls back to calibrated heuristic.
+    Generates a 4-point (day 1/3/7/10) impression trajectory.
+
+    Magnitude and shape are both driven by the platform's actual distribution model —
+    a follower-count-based reach ceiling per confidence tier, and a decay curve shape
+    specific to that platform (YouTube's slow algorithmic build looks nothing like
+    Twitter's 6-hour spike-and-crash, or LinkedIn's 48-hour peak). The LSTM's text
+    signal is used only as a bounded tilt on top of that ceiling, never as the
+    primary driver — see _lstm_signal_multiplier.
+
+    `prediction` must be the same HIGH/MEDIUM/LOW tier shown as the verdict badge
+    (from run_lgbm) — re-deriving it here from a raw confidence float with different
+    thresholds would let the trajectory shape disagree with the badge.
     """
-    # ── Try LSTM path ──────────────────────────────────────────────
-    if feature_vector and _load_lstm():
-        try:
-            import torch, numpy as _np, re
-            from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
-            _v = SentimentIntensityAnalyzer()
-            text = feature_vector.get("caption", "")[:300]
-            s = _v.polarity_scores(text)
-            feats = _np.array([[
-                s['compound'], max(0, s['compound']), abs(s['compound']),
-                s['pos'], s['neg'],
-                min(len(text), 300) / 300,
-                float('?' in text), float('!' in text),
-                min(text.count('!'), 5) / 5,
-                float(bool(re.search(r'how to|tutorial', text, re.I))),
-                float(bool(re.search(r'best|top|worst', text, re.I))),
-                float(bool(re.search(r'\d+', text))),
-                float(bool(re.search(r'you|your|we', text, re.I))),
-                float(bool(re.search(r'secret|hack|never|always', text, re.I))),
-                float(bool(re.search(r'shorts|short|quick', text, re.I))),
-                float(bool(re.search(r'full|complete', text, re.I))),
-                float(bool(re.search(r'vs|versus', text, re.I))),
-                float(bool(re.search(r'new|first|exclusive', text, re.I))),
-                min(len(re.findall(r'[A-Z]', text[:50])), 10) / 10,
-                min(len(text.split()), 20) / 20,
-            ]], dtype=_np.float32)
+    tier = prediction if prediction in ("HIGH", "MEDIUM", "LOW") else "MEDIUM"
+    profile = PLATFORM_PROFILES.get(platform.lower(), DEFAULT_PROFILE)
+    shape = CURVE_SHAPES[profile["curve"]]
+    ceiling = max(follower_count * profile["reach_cap"][tier], 150)
 
-            X_scaled = _lstm_scaler.transform(feats)
-            with torch.no_grad():
-                pred_norm = _lstm_model(torch.tensor(X_scaled, dtype=torch.float32)).numpy()[0]
-            pred_log_views = pred_norm * _lstm_tmax
-            raw_views = _np.expm1(pred_log_views)  # [d1, d3, d7, d10]
+    if feature_vector:
+        ceiling *= _lstm_signal_multiplier(feature_vector)
 
-            # Scale by follower count context — calibrated to real impression ranges
-            platform_mult = {
-                "tiktok": 8.0, "instagram": 4.0, "youtube": 12.0,
-                "twitter": 2.5, "linkedin": 1.8, "facebook": 2.0, "reddit": 3.0
-            }.get(platform.lower(), 3.0)
-            scale = max(0.1, follower_count / 10000) * platform_mult * confidence
-
-            # Apply tier-shaped curve multipliers (same logic as heuristic)
-            raw_normalized = [max(1.0, float(v * scale * 0.01)) for v in raw_views]
-            max_raw = max(raw_normalized)
-
-            if confidence > 0.65:
-                curve_mult = [0.30, 0.55, 1.00, 0.85]  # growth spike
-            elif confidence > 0.40:
-                curve_mult = [0.40, 0.80, 0.85, 0.70]  # plateau
-            else:
-                curve_mult = [1.00, 0.75, 0.42, 0.21]  # decay
-
-            base = max(follower_count * 0.08, 400)
-            mids = [max(int(base * cm), int(base * cm)) for cm in curve_mult]
-            # Scale up by model signal
-            signal_boost = max(1.0, max_raw / 10.0)
-            mids = [max(int(m * signal_boost), int(base * cm)) for m, cm in zip(mids, curve_mult)]
-
-            spreads = [0.20, 0.25, 0.30, 0.35]
-            points = [
-                TrajectoryPoint(
-                    day=d,
-                    low=max(0, int(m * (1 - sp))),
-                    mid=max(1, m),
-                    high=int(m * (1 + sp))
-                )
-                for d, m, sp in zip([1, 3, 7, 10], mids, spreads)
-            ]
-            return _cap_trajectory_to_reach(points, follower_count, confidence)
-        except Exception:
-            pass  # Fall through to heuristic
-
-    # ── Heuristic fallback ─────────────────────────────────────────
-    base_reach = max(follower_count * 0.1, 500)  # minimum 500 so chart never looks dead
-    platform_mult = {
-        "tiktok": 8.0, "instagram": 4.0, "youtube": 12.0,
-        "twitter": 2.5, "linkedin": 1.8, "facebook": 2.0, "reddit": 3.0
-    }.get(platform.lower(), 3.0)
-
-    if confidence > 0.65:
-        # HIGH — growth curve: slow start, big spike day 7, slight pullback day 10
-        growth = confidence * platform_mult
-        mids = [
-            int(base_reach * 1.5),
-            int(base_reach * growth * 2.5),
-            int(base_reach * growth * 5.0),
-            int(base_reach * growth * 4.2)
-        ]
-    elif confidence > 0.40:
-        # MEDIUM — plateau: rises to day 3, holds, slight drop
-        growth = confidence * platform_mult * 0.6
-        mids = [
-            int(base_reach * 1.0),
-            int(base_reach * growth * 1.8),
-            int(base_reach * growth * 1.9),
-            int(base_reach * growth * 1.5)
-        ]
-    else:
-        # LOW — decay curve: initial burst from followers, then drops off fast
-        mids = [
-            int(base_reach * 1.2),   # Day 1: initial follower exposure
-            int(base_reach * 0.9),   # Day 3: algorithm doesn't pick it up
-            int(base_reach * 0.5),   # Day 7: fades
-            int(base_reach * 0.25)   # Day 10: near zero organic reach
-        ]
-
+    mids = [max(1, int(ceiling * f)) for f in shape]
     spreads = [0.20, 0.25, 0.30, 0.35]
-    points = [
+    return [
         TrajectoryPoint(
             day=d,
             low=max(0, int(m * (1 - sp))),
-            mid=max(0, m),
-            high=int(m * (1 + sp))
+            mid=m,
+            high=int(m * (1 + sp)),
         )
         for d, m, sp in zip([1, 3, 7, 10], mids, spreads)
     ]
-    return _cap_trajectory_to_reach(points, follower_count, confidence)
 
 
 
@@ -443,7 +399,7 @@ async def analyze_post(
 
     # Generate trajectory
     trajectory = generate_trajectory(
-        confidence, follower_count, platform,
+        prediction, follower_count, platform,
         feature_vector={**feature_vector, "caption": caption}
     )
 
