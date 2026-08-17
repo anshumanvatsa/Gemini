@@ -1,19 +1,85 @@
-/* ── PreViral App Logic ─────────────────────────────────────────────── */
+/* -- PreViral App Logic -------------------------------------------- */
 
 const API_BASE = '';  // same origin
 let selectedPlatform = 'instagram';
+let selectedContentType = 'reel';
 let mediaFile = null;
 let lastResult = null;
 
-// ── Init ────────────────────────────────────────────────────────────────
+// -- Content type definitions per platform --
+const CONTENT_TYPES = {
+  instagram: [
+    { id: 'reel',     label: 'Reel',          visual: 'required' },
+    { id: 'carousel', label: 'Carousel',       visual: 'recommended' },
+    { id: 'post',     label: 'Single Post',    visual: 'recommended' },
+    { id: 'story',    label: 'Story',          visual: 'required' },
+  ],
+  tiktok: [
+    { id: 'video',    label: 'Video',          visual: 'required' },
+    { id: 'carousel', label: 'Photo Carousel', visual: 'recommended' },
+  ],
+  youtube: [
+    { id: 'video',    label: 'Video',          visual: 'required' },
+    { id: 'shorts',   label: 'Shorts',         visual: 'required' },
+    { id: 'community',label: 'Community Post', visual: 'none' },
+  ],
+  twitter: [
+    { id: 'tweet',    label: 'Tweet',          visual: 'none' },
+    { id: 'thread',   label: 'Thread',         visual: 'none' },
+    { id: 'media',    label: 'Tweet + Media',  visual: 'recommended' },
+  ],
+  linkedin: [
+    { id: 'text',     label: 'Text Post',      visual: 'none' },
+    { id: 'image',    label: 'Image Post',     visual: 'recommended' },
+    { id: 'article',  label: 'Article',        visual: 'recommended' },
+    { id: 'document', label: 'Document',       visual: 'recommended' },
+  ],
+  facebook: [
+    { id: 'post',     label: 'Post',           visual: 'recommended' },
+    { id: 'reel',     label: 'Reel',           visual: 'required' },
+    { id: 'story',    label: 'Story',          visual: 'required' },
+  ],
+};
+
+const VISUAL_MODE_CONFIG = {
+  required: {
+    tag: 'strongly recommended - critical for algorithm',
+    tagClass: 'tag-required',
+    icon: '\ud83d\uddbc\ufe0f',
+    uploadText: 'Upload your cover image or thumbnail',
+    showDesc: true,
+    disabled: false,
+  },
+  recommended: {
+    tag: 'optional - improves accuracy',
+    tagClass: 'tag-optional',
+    icon: '\ud83d\uddbc\ufe0f',
+    uploadText: 'Drop your image here or browse',
+    showDesc: true,
+    disabled: false,
+  },
+  none: {
+    tag: 'not applicable for this content type',
+    tagClass: 'tag-na',
+    icon: '',
+    uploadText: 'Drop your image here or browse',
+    showDesc: false,
+    disabled: true,
+  },
+};
+
+// -- Init --
 document.addEventListener('DOMContentLoaded', () => {
   setupPlatformPills();
+  rebuildContentTypePills('instagram');
   setupUpload();
   setupForm();
   setupCharCounter();
   setupReanalyze();
   checkReportRoute();
 });
+
+
 
 // ── Route: shared report page ──────────────────────────────────────────
 function checkReportRoute() {
@@ -28,13 +94,72 @@ function checkReportRoute() {
 
 // ── Platform Pills ──────────────────────────────────────────────────────
 function setupPlatformPills() {
-  document.querySelectorAll('.pill').forEach(btn => {
+  document.querySelectorAll('#platformPills .pill').forEach(btn => {
     btn.addEventListener('click', () => {
-      document.querySelectorAll('.pill').forEach(p => p.classList.remove('active'));
+      document.querySelectorAll('#platformPills .pill').forEach(p => p.classList.remove('active'));
       btn.classList.add('active');
       selectedPlatform = btn.dataset.platform;
+      rebuildContentTypePills(selectedPlatform);
     });
   });
+}
+
+// Build content type pills dynamically for selected platform
+function rebuildContentTypePills(platform) {
+  const container = document.getElementById('contentTypePills');
+  const types = CONTENT_TYPES[platform] || [];
+  container.innerHTML = '';
+  types.forEach((ct, idx) => {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'ct-pill' + (idx === 0 ? ' active' : '');
+    btn.dataset.ct = ct.id;
+    btn.dataset.visual = ct.visual;
+    btn.textContent = ct.label;
+    btn.addEventListener('click', () => {
+      container.querySelectorAll('.ct-pill').forEach(p => p.classList.remove('active'));
+      btn.classList.add('active');
+      selectedContentType = ct.id;
+      applyVisualMode(ct.visual);
+    });
+    container.appendChild(btn);
+  });
+  // Set first as default and apply its visual mode
+  if (types.length > 0) {
+    selectedContentType = types[0].id;
+    applyVisualMode(types[0].visual);
+  }
+}
+
+// Update visual input section based on visual mode
+function applyVisualMode(mode) {
+  const cfg = VISUAL_MODE_CONFIG[mode] || VISUAL_MODE_CONFIG.recommended;
+  const group = document.getElementById('visualInputGroup');
+  const label = document.getElementById('visualLabel');
+  const tag   = document.getElementById('visualTag');
+  const icon  = document.getElementById('uploadIcon');
+  const text  = document.getElementById('uploadText');
+  const descWrap = document.getElementById('visualDescWrap');
+
+  if (cfg.hidden) {
+    group.style.opacity = '0.4';
+    group.style.pointerEvents = 'none';
+  } else {
+    group.style.opacity = '1';
+    group.style.pointerEvents = '';
+  }
+
+  // Update tag text and class
+  tag.textContent = cfg.tag;
+  tag.className = 'optional-tag ' + cfg.tagClass;
+
+  // Update upload zone text
+  if (icon) icon.textContent = cfg.icon;
+  const uploadTextEl = document.getElementById('uploadText');
+  if (uploadTextEl) uploadTextEl.innerHTML = cfg.uploadText + ' or <span class="upload-link">browse</span>';
+
+  // Show/hide describe fallback
+  descWrap.style.display = cfg.showDesc ? 'block' : 'none';
 }
 
 // ── Upload ──────────────────────────────────────────────────────────────
@@ -76,9 +201,11 @@ function setupUpload() {
 function setupCharCounter() {
   const ta = document.getElementById('caption');
   const cnt = document.getElementById('charCount');
+  const analyzeBtn = document.getElementById('analyzeBtn');
   ta.addEventListener('input', () => {
     cnt.textContent = ta.value.length;
     cnt.style.color = ta.value.length > 2000 ? 'var(--orange)' : '';
+    analyzeBtn.classList.toggle('pulse-ready', ta.value.trim().length > 10);
   });
 }
 
@@ -92,11 +219,15 @@ function setupReanalyze() {
 }
 
 // ── Form Submit ─────────────────────────────────────────────────────────
+// ── Form Submit ───────────────────────────────────────────────────────
 function setupForm() {
   document.getElementById('analyzeForm').addEventListener('submit', async e => {
     e.preventDefault();
     const caption = document.getElementById('caption').value.trim();
     if (!caption) { alert('Please enter a caption.'); return; }
+
+    // Reset safety notice
+    document.getElementById('safetyNotice').style.display = 'none';
 
     showSection('loading');
     startLoadingAnimation();
@@ -104,10 +235,16 @@ function setupForm() {
     const fd = new FormData();
     fd.append('caption', caption);
     fd.append('platform', selectedPlatform);
+    fd.append('content_type', selectedContentType);
     fd.append('follower_count', document.getElementById('followerCount').value || 10000);
     fd.append('niche', document.getElementById('niche').value);
     fd.append('post_datetime', new Date().toISOString());
     if (mediaFile) fd.append('media', mediaFile);
+    // Describe-your-visual fallback
+    const visualDescEl = document.getElementById('visualDescription');
+    if (visualDescEl && visualDescEl.value.trim() && !mediaFile) {
+      fd.append('visual_description', visualDescEl.value.trim());
+    }
 
     try {
       const res = await fetch(`${API_BASE}/api/v1/analyze`, { method: 'POST', body: fd });
@@ -116,6 +253,11 @@ function setupForm() {
       lastResult = { caption, platform: selectedPlatform, ...data };
       showSection('results');
       renderResults(data, caption);
+
+      // Show safety notice if image was flagged
+      if (data.safety_flag) {
+        document.getElementById('safetyNotice').style.display = 'flex';
+      }
 
       // Fire AI Director call async after main results are shown
       triggerAIDirector(caption, selectedPlatform, data.confidence, data.prediction);
@@ -213,7 +355,12 @@ function renderResults(data, caption) {
   animateBar('bkHook', 'bkHookVal', hookVal);
   animateBar('bkSent', 'bkSentVal', sentVal);
   animateBar('bkTime', 'bkTimeVal', timeVal);
-  animateBar('bkHash', 'bkHashVal', hashVal);
+
+  const hasHashtags = (ht.hashtag_count || 0) > 0;
+  document.getElementById('bkHashBarWrap').style.display = hasHashtags ? '' : 'none';
+  document.getElementById('bkHashVal').style.display = hasHashtags ? '' : 'none';
+  document.getElementById('bkHashEmpty').style.display = hasHashtags ? 'none' : '';
+  if (hasHashtags) animateBar('bkHash', 'bkHashVal', hashVal);
 
   // Trajectory
   if (data.trajectory && data.trajectory.length) {
@@ -266,16 +413,17 @@ function animateBar(barId, valId, value) {
 function drawTrajectory(points, tier) {
   const canvas = document.getElementById('trajectoryChart');
   const ctx = canvas.getContext('2d');
-  const W = canvas.offsetWidth * devicePixelRatio;
-  const H = 220 * devicePixelRatio;
-  canvas.width = W; canvas.height = H;
-  ctx.scale(devicePixelRatio, devicePixelRatio);
-  const w = canvas.offsetWidth, h = 220;
+  const dpr = window.devicePixelRatio || 1;
+  const w = canvas.offsetWidth;
+  const h = 220;
+  canvas.width  = w * dpr;
+  canvas.height = h * dpr;
+  ctx.scale(dpr, dpr);
 
   const colors = { HIGH: '#10b981', MEDIUM: '#f59e0b', LOW: '#ef4444' };
   const color = colors[tier] || '#6366f1';
 
-  const PAD = { top: 20, right: 20, bottom: 40, left: 60 };
+  const PAD = { top: 24, right: 24, bottom: 40, left: 64 };
   const cw = w - PAD.left - PAD.right;
   const ch = h - PAD.top - PAD.bottom;
 
@@ -283,71 +431,84 @@ function drawTrajectory(points, tier) {
   const highs = points.map(p => p.high);
   const mids  = points.map(p => p.mid);
   const lows  = points.map(p => p.low);
-  const maxV  = Math.max(...highs) * 1.1 || 1;
+  const maxV  = Math.max(...highs) * 1.15 || 1;
 
   const px = i => PAD.left + (i / (days.length - 1)) * cw;
   const py = v => PAD.top + ch - (v / maxV) * ch;
 
-  const fmt = v => v >= 1e6 ? (v/1e6).toFixed(1)+'M' : v >= 1e3 ? (v/1e3).toFixed(0)+'K' : v;
+  const fmt = v => v >= 1e6 ? (v/1e6).toFixed(1)+'M' : v >= 1e3 ? Math.round(v/1e3)+'K' : String(Math.round(v));
 
-  // Grid
-  ctx.strokeStyle = 'rgba(255,255,255,0.05)';
-  ctx.lineWidth = 1;
-  for (let i = 0; i <= 4; i++) {
-    const y = PAD.top + (i / 4) * ch;
-    ctx.beginPath(); ctx.moveTo(PAD.left, y); ctx.lineTo(PAD.left + cw, y); ctx.stroke();
-    ctx.fillStyle = 'rgba(148,163,184,0.5)';
-    ctx.font = '11px Inter';
-    ctx.fillText(fmt(maxV * (1 - i/4)), 0, y + 4);
+  // ── Draw static background (grid + Y labels) ──────────────────────────
+  function drawBackground() {
+    // Grid lines
+    for (let i = 0; i <= 4; i++) {
+      const yPos = PAD.top + (i / 4) * ch;
+      const val  = maxV * (1 - i / 4);
+      const label = fmt(val);
+
+      ctx.strokeStyle = 'rgba(255,255,255,0.06)';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(PAD.left, yPos);
+      ctx.lineTo(PAD.left + cw, yPos);
+      ctx.stroke();
+
+      // Right-aligned Y-axis label (avoid colliding with plot area)
+      ctx.fillStyle = 'rgba(148,163,184,0.55)';
+      ctx.font = '10px Inter';
+      ctx.textAlign = 'right';
+      ctx.fillText(label, PAD.left - 8, yPos + 4);
+    }
+    ctx.textAlign = 'left';
   }
 
-  // Band (high-low)
-  ctx.beginPath();
-  highs.forEach((v, i) => i === 0 ? ctx.moveTo(px(i), py(v)) : ctx.lineTo(px(i), py(v)));
-  lows.slice().reverse().forEach((v, i) => ctx.lineTo(px(lows.length - 1 - i), py(v)));
-  ctx.closePath();
-  ctx.fillStyle = color + '18';
-  ctx.fill();
+  drawBackground();
 
-  // Mid line (animated)
-  let progress = 0;
-  const totalLen = mids.length - 1;
-  function drawFrame() {
-    ctx.clearRect(PAD.left, PAD.top - 5, cw + 5, ch + 10);
-
-    // Re-draw band
+  // ── Band (high-low confidence range) ──────────────────────────────────
+  function drawBand() {
     ctx.beginPath();
     highs.forEach((v, i) => i === 0 ? ctx.moveTo(px(i), py(v)) : ctx.lineTo(px(i), py(v)));
     lows.slice().reverse().forEach((v, i) => ctx.lineTo(px(lows.length - 1 - i), py(v)));
     ctx.closePath();
-    ctx.fillStyle = color + '18';
+    ctx.fillStyle = color + '1a';
     ctx.fill();
+  }
 
-    // Animated mid line
+  // ── Mid line (animated) ────────────────────────────────────────────────
+  let progress = 0;
+  const totalLen = mids.length - 1;
+
+  function drawFrame() {
+    // Full canvas clear each frame prevents ghost artifacts
+    ctx.clearRect(0, 0, w, h);
+    drawBackground();
+    drawBand();
+
     const draw_to = progress;
     ctx.beginPath();
     ctx.strokeStyle = color;
     ctx.lineWidth = 2.5;
     ctx.lineJoin = 'round';
-    ctx.lineCap = 'round';
+    ctx.lineCap  = 'round';
+
     for (let i = 0; i <= draw_to && i < mids.length; i++) {
-      const frac = Math.min(progress - Math.floor(progress), 1);
+      const frac = progress - Math.floor(progress);
       let x = px(i), y = py(mids[i]);
       if (i === Math.floor(draw_to) && i < mids.length - 1 && frac < 1) {
-        x = px(i) + (px(i+1) - px(i)) * frac;
-        y = py(mids[i]) + (py(mids[i+1]) - py(mids[i])) * frac;
+        x = px(i) + (px(i + 1) - px(i)) * frac;
+        y = py(mids[i]) + (py(mids[i + 1]) - py(mids[i])) * frac;
       }
       i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
     }
     ctx.stroke();
 
-    // Dot on last drawn point
+    // Leading dot
     const ci = Math.min(Math.floor(draw_to), mids.length - 1);
-    const frac = Math.min(draw_to - ci, 1);
+    const frac2 = Math.min(draw_to - ci, 1);
     let dotX = px(ci), dotY = py(mids[ci]);
     if (ci < mids.length - 1) {
-      dotX += (px(ci+1) - px(ci)) * frac;
-      dotY += (py(mids[ci+1]) - py(mids[ci])) * frac;
+      dotX += (px(ci + 1) - px(ci)) * frac2;
+      dotY += (py(mids[ci + 1]) - py(mids[ci])) * frac2;
     }
     ctx.beginPath();
     ctx.arc(dotX, dotY, 5, 0, Math.PI * 2);
@@ -358,20 +519,38 @@ function drawTrajectory(points, tier) {
       progress = Math.min(progress + 0.05, totalLen);
       requestAnimationFrame(drawFrame);
     } else {
-      // Labels on final points
-      ctx.fillStyle = 'rgba(148,163,184,0.8)';
-      ctx.font = '11px Inter';
-      days.forEach((d, i) => {
-        ctx.fillText('Day ' + d, px(i) - 15, h - 8);
-      });
-      // Point values
+      // Final state — draw all point labels
+      ctx.font = '10.5px Inter';
+      ctx.textAlign = 'center';
+
+      // Day labels along X axis
+      ctx.fillStyle = 'rgba(148,163,184,0.7)';
+      days.forEach((d, i) => ctx.fillText('Day ' + d, px(i), h - 6));
+
+      // Value labels above each point (collision-aware: first point shifts right)
       ctx.fillStyle = color;
-      ctx.font = '11px Inter';
-      mids.forEach((v, i) => ctx.fillText(fmt(v), px(i) - 12, py(v) - 10));
+      mids.forEach((v, i) => {
+        const lx = i === 0 ? px(i) + 14 : (i === mids.length - 1 ? px(i) - 14 : px(i));
+        ctx.fillText(fmt(v), lx, py(v) - 12);
+      });
+
+      ctx.textAlign = 'left';
+
+      // Permanent dots on each data point
+      mids.forEach((v, i) => {
+        ctx.beginPath();
+        ctx.arc(px(i), py(v), 4, 0, Math.PI * 2);
+        ctx.fillStyle = color;
+        ctx.fill();
+        ctx.strokeStyle = 'rgba(15,23,42,0.8)';
+        ctx.lineWidth = 1.5;
+        ctx.stroke();
+      });
     }
   }
   drawFrame();
 }
+
 
 // ── Counterfactuals ──────────────────────────────────────────────────────
 const CF_ICONS = ['🎯', '⏰', '#️⃣', '😊', '📸', '💡', '🔥', '📝'];
@@ -535,36 +714,47 @@ async function triggerAIDirector(caption, platform, confidence, prediction) {
 function renderDirector(d, originalCaption) {
   const body = document.getElementById('directorBody');
   const mode  = d.mode || (d.hook_variants ? 'optimizer' : 'fixer');
-  const currentConf = d.current_confidence || 0;
-  const afterConf   = d.predicted_score_after || Math.min(currentConf + 0.08, 0.98);
-  const liftPct     = Math.round((afterConf - currentConf) * 100);
-  const trail       = d.iteration_trail || [];
-  const bestIter    = d.best_iteration || null;
+  const currentConf  = d.current_confidence || 0;
+  const afterConf    = d.predicted_score_after || Math.min(currentConf + 0.08, 0.98);
+  const trail        = d.iteration_trail || [];
+  const origScore    = trail[0]?.score || Math.round(currentConf * 100);
+  const bestIterScore = trail.length > 1 ? Math.max(...trail.slice(1).map(t => t.score)) : 0;
+  // Use LightGBM actual score lift if positive, otherwise use Gemini estimate as secondary
+  const lgbmLift     = bestIterScore - origScore;
+  const geminiLift   = Math.round((afterConf - currentConf) * 100);
+  const liftPct      = lgbmLift > 0 ? lgbmLift : 0;   // never show negative lift
+  const bestIter     = d.best_iteration || null;
+  // Flag contradiction: Gemini says +big% but LightGBM says score dropped
+  const geminiOverclaiming = geminiLift > 10 && lgbmLift < 0;
 
-  // ── Iteration Trail ───────────────────────────────────────────────────────
+  // -- Iteration Trail --
   let trailHtml = '';
   if (trail.length > 1) {
-    const bestScore = Math.max(...trail.slice(1).map(t => t.score));
+    const origScore  = trail[0]?.score || 0;
+    const bestScore  = Math.max(...trail.slice(1).map(t => t.score));
+    const didImprove = bestScore > origScore;
     trailHtml = `
     <div class="iter-trail">
       <div class="iter-trail-label">Model-Validated Score Journey</div>
       <div class="iter-trail-steps">
         ${trail.map((t, i) => {
           const isOrig  = i === 0;
-          const isBest  = !isOrig && t.score === bestScore;
+          // BEST badge only if this iteration beat the original
+          const isBest  = !isOrig && t.score === bestScore && didImprove;
           const col     = t.score >= 75 ? '#10b981' : t.score >= 45 ? '#f59e0b' : '#ef4444';
+          const delta   = !isOrig ? (t.score > origScore ? `<span class="iter-delta up">+${t.score - origScore}</span>` : t.score < origScore ? `<span class="iter-delta down">${t.score - origScore}</span>` : '') : '';
           return `
           <div class="iter-step ${isBest ? 'iter-best' : ''}">
             <div class="iter-label">${escHtml(t.label)}</div>
-            <div class="iter-score" style="color:${col}">${t.score}</div>
+            <div class="iter-score" style="color:${col}">${t.score}${delta}</div>
             ${isBest ? '<div class="iter-best-badge">BEST</div>' : ''}
           </div>
           ${i < trail.length - 1 ? '<div class="iter-arrow">→</div>' : ''}`;
         }).join('')}
       </div>
-      ${bestScore > (trail[0]?.score || 0) ?
-        `<div class="iter-summary">+${bestScore - trail[0].score} points gained across ${trail.length - 1} iteration${trail.length > 2 ? 's' : ''}. Best rewrite returned.</div>` :
-        `<div class="iter-summary">Original was already optimal — returning best available rewrite.</div>`
+      ${didImprove
+        ? `<div class="iter-summary">+${bestScore - origScore} points gained. Best rewrite selected.</div>`
+        : `<div class="iter-summary iter-summary-warn">Gemini's rewrites scored lower on our ML model — the original caption is stronger for the algorithm. Gemini suggestions shown for creativity only.</div>`
       }
     </div>`;
   }
@@ -718,14 +908,21 @@ function renderDirector(d, originalCaption) {
       ${liftPct > 0 ? `
       <div class="score-lift">
         <div>
-          <div class="lift-label">Predicted score lift after applying suggestions</div>
+          <div class="lift-label">ML-validated score lift</div>
           <div class="lift-val">+${liftPct}%</div>
         </div>
         <div class="lift-arrow">→</div>
         <div>
           <div class="lift-label">New predicted confidence</div>
-          <div class="lift-val">${Math.round(afterConf * 100)}%</div>
+          <div class="lift-val">${Math.round((origScore/100 + liftPct/100) * 100)}%</div>
         </div>
+      </div>` : geminiOverclaiming ? `
+      <div class="score-lift score-lift-warn">
+        <span style="font-size:13px;color:var(--text-sub)">
+          ⚠️ Gemini estimates +${geminiLift}% lift, but our LightGBM model scored the rewrite lower.
+          The rewrite may be strong creatively but uses niche vocabulary outside the model's training distribution.
+          Use your judgment — apply the suggestions that feel right for your audience.
+        </span>
       </div>` : ''}
     `;
   }

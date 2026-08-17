@@ -1,0 +1,40 @@
+# Ignore large/unnecessary files in Docker build
+.git
+__pycache__
+*.pyc
+*.pyo
+.venv
+venv
+.env
+*.log
+phase2/
+# data/ is needed for peak_windows.json
+research/
+reports/
+*.csv
+
+# Ignore the huge calibrated model files (500MB+ each)
+# We only need previral_lgbm_v5.joblib (87MB) for production
+models/saved/previral_lgbm_v5_cal.joblib
+models/saved/previral_lgbm_v6_cal.joblib
+models/saved/previral_lgbm_v6.joblib
+models/saved/previral_lgbm_v4.joblib
+models/saved/previral_lgbm_v3.joblib
+models/saved/previral_lgbm_v2.joblib
+models/saved/previral_lgbm.joblib
+models/saved/lstm_checkpoint.pt
+
+# Ignore training scripts
+# Exclude large training scripts (keep __init__.py and train_lstm.py — needed at runtime)
+models/master_train*.py
+models/clean_retrain.py
+models/direct_test.py
+models/eval_api.py
+models/eval_direct.py
+models/fix_and_evaluate.py
+models/rebuild_pipeline.py
+models/scratch_leakage_check.py
+models/train_from_csv.py
+models/train_lgbm.py
+models/api_test.py
+models/__pycache__

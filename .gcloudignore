@@ -1,0 +1,31 @@
+# .gcloudignore — controls what gets uploaded to Cloud Build
+# Unlike .gitignore, we DO include the model files here
+
+.git
+__pycache__
+*.pyc
+*.pyo
+.venv
+venv
+*.log
+phase2/
+# data/ is needed for peak_windows.json
+research/
+reports/
+*.csv
+
+# Exclude huge calibrated models (500MB+ each) — only need v5 (87MB)
+models/saved/previral_lgbm_v5_cal.joblib
+models/saved/previral_lgbm_v6_cal.joblib
+models/saved/previral_lgbm_v6.joblib
+models/saved/previral_lgbm_v4.joblib
+models/saved/previral_lgbm_v3.joblib
+models/saved/previral_lgbm_v2.joblib
+models/saved/previral_lgbm.joblib
+models/saved/lstm_checkpoint.pt
+# Allowed: models/*.py
+models/__pycache__
+
+# Exclude training data and scripts
+smoke_test.py
+DEVELOPMENT_LOG.md

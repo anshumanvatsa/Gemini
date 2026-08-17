@@ -59,6 +59,42 @@ def _load_lstm():
         return False
 
 
+def _cap_trajectory_to_reach(points: list, follower_count: int, confidence: float) -> list:
+    """
+    Bounds a trajectory to a realistic reach ceiling given the account's follower count.
+
+    The LSTM was trained on YouTube Trending data, so its raw output reflects videos
+    that reached millions of views by definition — it has no signal for a typical
+    sub-100K-follower account. Without this cap, predictions can land 15-20x higher
+    than what a creator at that follower count would actually see. This scales the
+    whole curve down proportionally (preserving its shape) rather than flattening
+    the peak, so the trajectory still tells the "grows then plateaus/decays" story —
+    just bounded to plausible reach for the account size.
+    """
+    if confidence > 0.65:
+        ceiling = follower_count * 0.30
+    elif confidence > 0.40:
+        ceiling = follower_count * 0.15
+    else:
+        ceiling = follower_count * 0.06
+    ceiling = max(ceiling, 200)  # keep the chart from looking dead for tiny accounts
+
+    max_mid = max((p.mid for p in points), default=0)
+    if max_mid <= ceiling:
+        return points
+
+    scale = ceiling / max_mid
+    return [
+        TrajectoryPoint(
+            day=p.day,
+            low=max(0, int(p.low * scale)),
+            mid=max(1, int(p.mid * scale)),
+            high=max(1, int(p.high * scale)),
+        )
+        for p in points
+    ]
+
+
 def generate_trajectory(confidence: float, follower_count: int, platform: str,
                         feature_vector: dict = None) -> list:
     """
@@ -123,7 +159,7 @@ def generate_trajectory(confidence: float, follower_count: int, platform: str,
             mids = [max(int(m * signal_boost), int(base * cm)) for m, cm in zip(mids, curve_mult)]
 
             spreads = [0.20, 0.25, 0.30, 0.35]
-            return [
+            points = [
                 TrajectoryPoint(
                     day=d,
                     low=max(0, int(m * (1 - sp))),
@@ -132,6 +168,7 @@ def generate_trajectory(confidence: float, follower_count: int, platform: str,
                 )
                 for d, m, sp in zip([1, 3, 7, 10], mids, spreads)
             ]
+            return _cap_trajectory_to_reach(points, follower_count, confidence)
         except Exception:
             pass  # Fall through to heuristic
 
@@ -170,7 +207,7 @@ def generate_trajectory(confidence: float, follower_count: int, platform: str,
         ]
 
     spreads = [0.20, 0.25, 0.30, 0.35]
-    return [
+    points = [
         TrajectoryPoint(
             day=d,
             low=max(0, int(m * (1 - sp))),
@@ -179,6 +216,7 @@ def generate_trajectory(confidence: float, follower_count: int, platform: str,
         )
         for d, m, sp in zip([1, 3, 7, 10], mids, spreads)
     ]
+    return _cap_trajectory_to_reach(points, follower_count, confidence)
 
 
 
@@ -194,15 +232,16 @@ def compute_reach_percentile(confidence: float, features: dict) -> int:
     bonus += features.get("color_vibrancy", 0) * 7
     return min(99, max(1, int(base + bonus)))
 
-# ── LightGBM Predictor ────────────────────────────────────────────────────────
-def run_lgbm(feature_vector: dict) -> tuple:
-    """
-    Run LightGBM prediction. Falls back to heuristic if model not trained yet.
-    Returns (prediction: str, confidence: float)
-    """
-    # Model priority: v5 raw (84MB, deployment-safe) > v5_cal (508MB, needs 1GB+ RAM)
-    # > v4 > v3 > v2 > v1
-    # NOTE: Use previral_lgbm_v5_cal.joblib on servers with 2GB+ RAM for best accuracy.
+# ── LightGBM Model Cache (loads once, stays in memory) ───────────────────────
+_lgbm_model       = None
+_lgbm_feature_cols = None
+
+def _ensure_lgbm_loaded():
+    """Load LightGBM model and feature columns into memory on first call."""
+    global _lgbm_model, _lgbm_feature_cols
+    if _lgbm_model is not None:
+        return True
+    import joblib
     SAVED = os.path.join(os.path.dirname(__file__), '..', '..', 'models', 'saved')
     def _pick(*names):
         for n in names:
@@ -214,11 +253,30 @@ def run_lgbm(feature_vector: dict) -> tuple:
                        'previral_lgbm.joblib')
     COLS_PATH  = _pick('feature_columns_v5.joblib', 'feature_columns_v4.joblib',
                        'feature_columns_v3.joblib', 'feature_columns.joblib')
-
     try:
-        import joblib
-        model = joblib.load(MODEL_PATH)
-        feature_cols = joblib.load(COLS_PATH)
+        _lgbm_model        = joblib.load(MODEL_PATH)
+        _lgbm_feature_cols = joblib.load(COLS_PATH)
+        return True
+    except Exception:
+        return False
+
+# Pre-load on import so the first request is fast
+try:
+    _ensure_lgbm_loaded()
+except Exception:
+    pass
+
+# ── LightGBM Predictor ────────────────────────────────────────────────────────
+def run_lgbm(feature_vector: dict) -> tuple:
+    """
+    Run LightGBM prediction using cached model (loaded once at startup).
+    Returns (prediction: str, confidence: float)
+    """
+    try:
+        if not _ensure_lgbm_loaded():
+            raise RuntimeError("Model not loaded")
+        model        = _lgbm_model
+        feature_cols = _lgbm_feature_cols
 
         # Build platform one-hot features
         PLATFORMS = ['youtube', 'instagram', 'tiktok', 'twitter', 'linkedin',
@@ -272,10 +330,12 @@ def run_lgbm(feature_vector: dict) -> tuple:
 async def analyze_post(
     caption: str = Form(...),
     platform: str = Form(...),
+    content_type: Optional[str] = Form(None),
     post_datetime: Optional[str] = Form(None),
     follower_count: Optional[int] = Form(1000),
     avg_engagement_rate: Optional[float] = Form(0.03),
     niche: Optional[str] = Form("tech"),
+    visual_description: Optional[str] = Form(None),
     vision_cache_id: Optional[str] = Form(None),
     media: Optional[UploadFile] = File(None)
 ):
@@ -305,9 +365,13 @@ async def analyze_post(
     timing_task  = loop.run_in_executor(None, analyze_timing, platform, dt)
     hashtag_task = loop.run_in_executor(None, score_hashtags, hashtags, platform, caption)
 
-    # Gemini multimodal NLP task — runs async so latency is hidden behind LightGBM
+    # Gemini multimodal NLP task -- runs async so latency is hidden behind LightGBM
+    # Pass visual_description text as fallback when no image is uploaded
     if GEMINI_ENGINE_AVAILABLE:
-        gemini_task = loop.run_in_executor(None, gemini_features, caption, platform, image_bytes)
+        gemini_task = loop.run_in_executor(
+            None, gemini_features, caption, platform,
+            image_bytes, None, content_type, visual_description
+        )
     else:
         async def _no_gemini():
             return {}

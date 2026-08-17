@@ -37,7 +37,7 @@ except ImportError:
 # ── Config ────────────────────────────────────────────────────────────────────
 # Use gemini-flash-latest — confirmed working on free API keys
 # (gemini-2.5-flash is restricted for new API keys as of Aug 2026)
-MODEL_NAME = os.getenv("GEMINI_MODEL", "gemini-flash-latest")
+MODEL_NAME = os.getenv("GEMINI_MODEL", "gemini-flash-lite-latest")
 
 # ── Default features (fallback when Gemini unavailable) ──────────────────────
 DEFAULT_FEATURES = {
@@ -170,6 +170,23 @@ def _clean_json(raw: str) -> str:
     return raw.strip()
 
 
+def _repair_json(raw: str) -> str:
+    """
+    Best-effort repair of truncated/malformed JSON from LLM responses.
+    Handles trailing commas, unclosed brackets, and other common issues.
+    """
+    raw = raw.strip()
+    # Remove trailing comma before closing brace/bracket
+    raw = re.sub(r',\s*([}\]])', r'\1', raw)
+    # Try to close unclosed structures
+    opens  = raw.count('{') - raw.count('}')
+    aopens = raw.count('[') - raw.count(']')
+    if opens > 0 or aopens > 0:
+        raw = raw.rstrip().rstrip(',')
+        raw += ']' * aopens + '}' * opens
+    return raw
+
+
 def _build_contents(prompt: str, image_bytes: Optional[bytes] = None) -> list:
     """
     Build a single multimodal Gemini request containing BOTH image and text.
@@ -212,9 +229,15 @@ def extract_features(
     caption: str,
     platform: str = "instagram",
     image_bytes: Optional[bytes] = None,
+    _unused: None = None,
+    content_type: Optional[str] = None,
+    visual_description: Optional[str] = None,
 ) -> dict:
     """
     Extract NLP features via Gemini multimodal.
+    - image_bytes: actual image upload (highest priority)
+    - visual_description: text fallback when creator doesn't upload image
+    - content_type: platform content type (reel, tweet, etc.) for context
     Drop-in replacement for nlp_engine.analyze_caption().
     Falls back to local NLP engine if Gemini unavailable.
     """
@@ -229,7 +252,17 @@ def extract_features(
         except Exception:
             return {**DEFAULT_FEATURES, "text_length": len(caption), "_gemini_used": False}
 
-    prompt = ANALYSIS_PROMPT.format(caption=caption[:2000], platform=platform)
+    # Build context-aware prompt
+    visual_context = ""
+    if visual_description:
+        visual_context = f"\nVisual Description (creator described their image): {visual_description}"
+    if content_type:
+        visual_context += f"\nContent Type: {content_type}"
+
+    prompt = ANALYSIS_PROMPT.format(
+        caption=caption[:2000] + visual_context,
+        platform=platform
+    )
 
     try:
         t0 = time.time()
@@ -238,7 +271,7 @@ def extract_features(
             contents=_build_contents(prompt, image_bytes),
             config=types.GenerateContentConfig(
                 temperature=0.1,
-                max_output_tokens=2048,
+                max_output_tokens=6144,  # thinking model needs headroom before producing JSON
             )
         )
         elapsed_ms = int((time.time() - t0) * 1000)
@@ -348,10 +381,18 @@ def ai_content_director(
             contents=_build_contents(prompt, image_bytes),
             config=types.GenerateContentConfig(
                 temperature=0.4,
-                max_output_tokens=4096,
+                max_output_tokens=8192,  # thinking model needs headroom for reasoning tokens
             )
         )
         raw_text = _get_text(response) or ""
+        if not raw_text:
+            # Thinking model ran out of tokens before producing output
+            finish = None
+            try:
+                finish = response.candidates[0].finish_reason
+            except Exception:
+                pass
+            raise ValueError(f"Empty response from Gemini (finish_reason={finish}). Thinking tokens may have exhausted the budget.")
         cleaned  = _clean_json(raw_text)
         repaired = _repair_json(cleaned)
         result   = json.loads(repaired)
@@ -360,9 +401,11 @@ def ai_content_director(
         return result
     except Exception as e:
         err_str = str(e)
+        import sys
+        print(f"[AI Director ERROR] {err_str[:200]}", file=sys.stderr)
         if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str:
             fallback["alignment_assessment"] = (
-                "⏳ Gemini quota reached for today. Your content analysis and score are still running. "
+                "Gemini quota reached for today. Your content analysis and score are still running. "
                 "AI rewrite will be available after your quota resets (usually midnight US Pacific time)."
             )
             fallback["_quota_exhausted"] = True

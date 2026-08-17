@@ -55,7 +55,7 @@
       <div class="input-card glass">
         <div class="input-header">
           <h2>Analyze Your Post</h2>
-          <p>Paste your caption, select platform, upload thumbnail (optional)</p>
+          <p>Select your platform and content type, then paste your caption for a full performance prediction.</p>
         </div>
 
         <form id="analyzeForm" class="form">
@@ -72,6 +72,14 @@
             </div>
           </div>
 
+          <!-- Content Type selector (dynamic per platform) -->
+          <div class="platform-row" id="contentTypeRow">
+            <label class="form-label">Content Type</label>
+            <div class="content-type-pills" id="contentTypePills">
+              <!-- populated by JS based on selected platform -->
+            </div>
+          </div>
+
           <!-- Caption -->
           <div class="form-group">
             <label class="form-label" for="caption">Caption / Title</label>
@@ -80,18 +88,33 @@
             <div class="char-counter"><span id="charCount">0</span> / 2200</div>
           </div>
 
-          <!-- Thumbnail upload -->
-          <div class="form-group">
-            <label class="form-label">Thumbnail / Image <span class="optional-tag">optional — enables visual analysis</span></label>
+          <!-- Smart Visual Input (adapts per content type) -->
+          <div class="form-group" id="visualInputGroup">
+            <label class="form-label" id="visualLabel">Thumbnail / Cover Image <span class="optional-tag" id="visualTag">optional — improves accuracy</span></label>
+
+            <!-- Safety notice banner -->
+            <div class="safety-notice" id="safetyNotice" style="display:none">
+              ⚠️ This image was flagged by our safety filters. Caption analysis and scoring are still available, but visual analysis has been skipped.
+            </div>
+
+            <!-- Upload zone -->
             <div class="upload-zone" id="uploadZone">
-              <div class="upload-icon">🖼️</div>
-              <div class="upload-text">Drop your thumbnail here or <span class="upload-link">browse</span></div>
+              <div class="upload-icon" id="uploadIcon">🖼️</div>
+              <div class="upload-text" id="uploadText">Drop your thumbnail here or <span class="upload-link">browse</span></div>
               <div class="upload-sub">JPG, PNG, WEBP · Max 10MB</div>
               <input type="file" id="mediaInput" name="media" accept="image/*" style="display:none" />
             </div>
             <div class="thumb-preview" id="thumbPreview" style="display:none">
               <img id="thumbImg" src="" alt="Thumbnail preview" />
               <button type="button" class="thumb-remove" id="thumbRemove">✕ Remove</button>
+            </div>
+
+            <!-- Describe your visual (fallback for privacy / pre-production) -->
+            <div class="visual-desc-wrap" id="visualDescWrap" style="display:none">
+              <div class="visual-desc-divider"><span>or describe your visual instead</span></div>
+              <textarea id="visualDescription" class="form-textarea visual-desc-input" rows="2"
+                placeholder='e.g. "Professional headshot with bold text overlay: 5 Marketing Mistakes"'></textarea>
+              <div class="visual-desc-hint">Gemini will estimate visual-caption alignment from your description — no upload needed.</div>
             </div>
           </div>
 
@@ -208,8 +231,9 @@
         </div>
         <div class="breakdown-card glass-sm">
           <div class="bk-label">Hashtag Score</div>
-          <div class="bk-bar-wrap"><div class="bk-bar bk-orange" id="bkHash"></div></div>
+          <div class="bk-bar-wrap" id="bkHashBarWrap"><div class="bk-bar bk-orange" id="bkHash"></div></div>
           <div class="bk-val" id="bkHashVal">--</div>
+          <div class="bk-empty-note" id="bkHashEmpty" style="display:none">No hashtags detected</div>
         </div>
       </div>
 

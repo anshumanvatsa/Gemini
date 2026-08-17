@@ -1,0 +1,42 @@
+# PreViral Production Dependencies (Cloud Run)
+# Core API
+fastapi==0.111.0
+uvicorn[standard]==0.30.1
+python-multipart==0.0.9
+pydantic==2.7.1
+
+# NLP Engine
+vaderSentiment==3.3.2
+
+# Vision Engine (headless for server)
+opencv-python-headless==4.10.0.84
+Pillow==10.3.0
+
+# Hashtag DB
+sqlite-utils==3.36
+
+# ML Models
+lightgbm==4.3.0
+scikit-learn==1.5.0
+joblib==1.4.2
+numpy==1.26.4
+pandas<2.0.0
+
+# Counterfactual Engine
+dice-ml==0.11
+
+# Gemini AI Integration (XPRIZE submission — core feature)
+google-genai>=1.0.0
+
+# Utilities
+python-dotenv==1.0.1
+aiofiles==23.2.1
+httpx==0.27.0
+
+# PyTorch CPU-only (for LSTM trajectory — much smaller than full torch)
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch==2.3.1+cpu
+
+# Needed by LSTM trajectory
+sentence-transformers==3.0.1
+transformers==4.41.2

@@ -230,6 +230,13 @@ select.form-input { cursor: pointer; }
 .analyze-btn:disabled { opacity: 0.6; cursor: not-allowed; transform: none; }
 .btn-icon { font-size: 18px; }
 
+.analyze-btn.pulse-ready { animation: btn-pulse 2s ease-in-out infinite; }
+.analyze-btn.pulse-ready:hover { animation: none; }
+@keyframes btn-pulse {
+  0%, 100% { box-shadow: 0 4px 20px rgba(99,102,241,0.35); }
+  50% { box-shadow: 0 4px 28px rgba(99,102,241,0.75); }
+}
+
 /* ── Loading ──────────────────────────────────────────────────────────── */
 .loading-card {
   padding: 48px 32px; text-align: center;
@@ -368,6 +375,7 @@ select.form-input { cursor: pointer; }
 .bk-purple { background: var(--accent2); }
 .bk-orange { background: var(--orange); }
 .bk-val { font-size: 20px; font-weight: 700; }
+.bk-empty-note { font-size: 13px; color: var(--text-sub); font-weight: 500; padding: 4px 0; }
 
 /* ── Section header ───────────────────────────────────────────────────── */
 .section-header { display: flex; align-items: baseline; gap: 12px; margin-bottom: 20px; flex-wrap: wrap; }
@@ -807,4 +815,136 @@ select.form-input { cursor: pointer; }
   font-size: 11px;
   color: var(--text-sub);
   font-style: italic;
+}
+
+/* -- Content Type Pills -------------------------------------------- */
+.content-type-pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.ct-pill {
+  padding: 5px 13px;
+  border-radius: 14px;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text-muted);
+  transition: all 0.18s;
+  letter-spacing: 0.01em;
+}
+
+.ct-pill:hover {
+  border-color: rgba(99,102,241,0.4);
+  color: var(--text-sub);
+}
+
+.ct-pill.active {
+  background: rgba(99,102,241,0.1);
+  border-color: rgba(99,102,241,0.5);
+  color: var(--accent);
+}
+
+/* -- Visual Tag States --------------------------------------------- */
+.optional-tag.tag-required {
+  background: rgba(239,68,68,0.12);
+  color: #f87171;
+  border: 1px solid rgba(239,68,68,0.25);
+  border-radius: 6px;
+  padding: 2px 7px;
+}
+
+.optional-tag.tag-optional {
+  background: rgba(99,102,241,0.1);
+  color: var(--text-sub);
+}
+
+.optional-tag.tag-na {
+  background: rgba(71,85,105,0.15);
+  color: var(--text-muted);
+}
+
+/* -- Describe Your Visual ------------------------------------------ */
+.visual-desc-wrap {
+  margin-top: 10px;
+}
+
+.visual-desc-divider {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+
+.visual-desc-divider::before,
+.visual-desc-divider::after {
+  content: '';
+  flex: 1;
+  height: 1px;
+  background: var(--border);
+}
+
+.visual-desc-divider span {
+  font-size: 11px;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.visual-desc-input {
+  min-height: 60px;
+  font-size: 13px;
+}
+
+.visual-desc-hint {
+  margin-top: 5px;
+  font-size: 11px;
+  color: var(--text-muted);
+  font-style: italic;
+}
+
+/* -- Safety Notice -------------------------------------------------- */
+.safety-notice {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px 14px;
+  background: rgba(245,158,11,0.08);
+  border: 1px solid rgba(245,158,11,0.2);
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+  color: #fbbf24;
+  margin-bottom: 10px;
+  line-height: 1.5;
+}
+
+/* -- Iteration Delta Indicators ------------------------------------ */
+.iter-delta {
+  font-size: 10px;
+  font-weight: 700;
+  margin-left: 4px;
+  vertical-align: super;
+}
+.iter-delta.up   { color: #10b981; }
+.iter-delta.down { color: #ef4444; }
+
+/* Warn state for iter summary when score dropped */
+.iter-summary-warn {
+  margin-top: 10px;
+  font-size: 11px;
+  color: #f59e0b;
+  font-style: italic;
+  border-left: 2px solid rgba(245,158,11,0.4);
+  padding-left: 8px;
+}
+
+/* Warn state for score lift when Gemini and LightGBM disagree */
+.score-lift-warn {
+  background: rgba(245,158,11,0.06);
+  border: 1px solid rgba(245,158,11,0.2);
+  border-radius: var(--radius-sm);
+  padding: 10px 14px;
+  margin-top: 14px;
 }

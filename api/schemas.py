@@ -81,6 +81,9 @@ class AnalyzeResponse(BaseModel):
     # 10-Day Summary Report
     ten_day_summary: Optional[Dict[str, Any]] = None
 
+    # Content Safety (Gemini image moderation)
+    safety_flag: Optional[bool] = False
+
 
 class HashtagQueryRequest(BaseModel):
     query: str
