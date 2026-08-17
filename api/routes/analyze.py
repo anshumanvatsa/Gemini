@@ -60,12 +60,20 @@ def _load_lstm():
 
 
 CURVE_SHAPES = {
-    "slow_build":    [0.35, 0.65, 1.00, 0.85],  # rises to a day-7 peak, slight pullback
-    "variable":      [0.45, 0.70, 1.00, 0.80],  # recommendation-engine driven, can spike late
-    "fast_spike":    [1.00, 0.55, 0.30, 0.20],  # push to a seed audience, decays if it doesn't expand
-    "instant_decay": [1.00, 0.15, 0.05, 0.02],  # ~90% of impressions land in the first hours
-    "peak_48h":      [0.80, 1.00, 0.35, 0.15],  # peaks around day 2-3, decays sharply after
-    "suppressed":    [0.60, 0.40, 0.25, 0.15],  # organic reach throttled from the start
+    "slow_build":     [0.35, 0.65, 1.00, 0.85],  # rises to a day-7 peak, slight pullback — evergreen/search-driven
+    "variable":       [0.45, 0.70, 1.00, 0.80],  # recommendation-engine driven, can spike late
+    "fast_spike":     [1.00, 0.55, 0.30, 0.20],  # push to a seed audience, decays if it doesn't expand
+    "instant_decay":  [1.00, 0.15, 0.05, 0.02],  # ~90% of impressions land in the first hours
+    "peak_48h":       [0.80, 1.00, 0.35, 0.15],  # peaks around day 2-3, decays sharply after
+    "suppressed":     [0.60, 0.40, 0.25, 0.15],  # organic reach throttled from the start
+    # ── content-type-specific shapes (YouTube / Instagram) ──────────────────
+    "topical_spike":  [1.00, 0.22, 0.05, 0.02],  # news/reactive video: subscriber+notification driven,
+                                                  # decays hard once the topic goes stale — calibrated against
+                                                  # a real 122K-sub channel: 42K day-1 views, ~70K lifetime
+    "shorts_spike":   [0.85, 1.00, 0.55, 0.30],  # Shorts feed algorithm peaks ~day 2-3, decays after
+    "single_day":     [1.00, 0.05, 0.02, 0.01],  # community posts / Stories — visibility ends after day 1
+    "explore_pickup": [0.65, 1.00, 0.70, 0.45],  # Reel picked up by Explore after strong early engagement
+    "carousel_build": [0.65, 1.00, 0.55, 0.30],  # saves/shares accumulate through day 3, then fades
 }
 
 # Each platform's algorithm distributes content differently, so a single curve
@@ -74,7 +82,8 @@ CURVE_SHAPES = {
 # YouTube don't just differ in size, they differ in shape. `reach_cap` bounds the
 # curve's peak as a fraction of follower_count per confidence tier, calibrated to
 # typical organic reach for that platform — not to the LSTM's YouTube-Trending-only
-# training distribution.
+# training distribution. This is the fallback used for platforms/content-types
+# without a dedicated profile in _resolve_trajectory_profile below.
 PLATFORM_PROFILES = {
     "youtube":   {"curve": "slow_build",    "reach_cap": {"HIGH": 0.30, "MEDIUM": 0.15, "LOW": 0.06}},
     "tiktok":    {"curve": "variable",      "reach_cap": {"HIGH": 0.35, "MEDIUM": 0.20, "LOW": 0.08}},
@@ -85,6 +94,69 @@ PLATFORM_PROFILES = {
     "reddit":    {"curve": "fast_spike",    "reach_cap": {"HIGH": 0.25, "MEDIUM": 0.14, "LOW": 0.05}},
 }
 DEFAULT_PROFILE = {"curve": "slow_build", "reach_cap": {"HIGH": 0.15, "MEDIUM": 0.10, "LOW": 0.04}}
+
+# Words that mark a caption as timely/reactive rather than evergreen. A YouTube
+# video about "today's" news lives and dies with the news cycle — most of its
+# views land on day 1 via subscriber notifications, and it doesn't get pushed by
+# search/suggested the way an evergreen tutorial does. This is the single biggest
+# shape difference we found testing against a real channel (see topical_spike).
+_TOPICAL_RE = None
+def _is_topical(text: str) -> bool:
+    global _TOPICAL_RE
+    if _TOPICAL_RE is None:
+        import re as _re
+        _TOPICAL_RE = _re.compile(
+            r'\b(breaking|today|this week|yesterday|just (in|announced|happened|dropped)|'
+            r'live now|update|latest|news|reacts?|reaction|responds?|response to|'
+            r'controversy|exposed|drama|beef|diss (track)?|leaked|arrested|dies|'
+            r'passes? away|trending now|caught on camera)\b',
+            _re.IGNORECASE
+        )
+    return bool(_TOPICAL_RE.search(text or ""))
+
+
+def _resolve_trajectory_profile(platform: str, content_type: str, tier: str, is_topical: bool):
+    """
+    Picks the (curve_shape, reach_cap_fraction) for a platform + content type + tier.
+
+    YouTube and Instagram get dedicated per-content-type profiles because content
+    type changes the distribution mechanism, not just the numbers: a YouTube Short
+    rides the Shorts feed algorithm, a long-form news video is subscriber/notification
+    driven and dies with the news cycle, and a Community post barely leaves the
+    subscriber feed at all. Same story on Instagram — a Story is gone in 24h, a
+    Carousel builds slowly on saves, and a Reel only gets Explore-page reach if it
+    proves itself in the first few hours. Other platforms fall back to one profile
+    per platform (see PLATFORM_PROFILES) — TikTok/Twitter/LinkedIn/Facebook are next.
+    """
+    platform = (platform or "").lower()
+    content_type = (content_type or "").lower()
+
+    if platform == "youtube":
+        if content_type == "shorts":
+            return CURVE_SHAPES["shorts_spike"], {"HIGH": 0.55, "MEDIUM": 0.28, "LOW": 0.10}[tier]
+        if content_type == "community":
+            return CURVE_SHAPES["single_day"], {"HIGH": 0.15, "MEDIUM": 0.08, "LOW": 0.03}[tier]
+        # long-form video (default): evergreen vs topical/reactive content
+        if is_topical:
+            return CURVE_SHAPES["topical_spike"], {"HIGH": 0.38, "MEDIUM": 0.20, "LOW": 0.08}[tier]
+        return CURVE_SHAPES["slow_build"], {"HIGH": 0.30, "MEDIUM": 0.15, "LOW": 0.06}[tier]
+
+    if platform == "instagram":
+        if content_type == "reel":
+            if tier == "HIGH":
+                # Explore-page pickup can reach well past the follower count itself
+                return CURVE_SHAPES["explore_pickup"], 0.60
+            return CURVE_SHAPES["fast_spike"], {"MEDIUM": 0.12, "LOW": 0.05}.get(tier, 0.12)
+        if content_type == "carousel":
+            return CURVE_SHAPES["carousel_build"], {"HIGH": 0.20, "MEDIUM": 0.10, "LOW": 0.04}[tier]
+        if content_type == "story":
+            # Stories expire in 24h, but reach a large share of active followers on day 1
+            return CURVE_SHAPES["single_day"], {"HIGH": 0.35, "MEDIUM": 0.20, "LOW": 0.10}[tier]
+        # single feed post (default)
+        return CURVE_SHAPES["fast_spike"], {"HIGH": 0.18, "MEDIUM": 0.10, "LOW": 0.04}[tier]
+
+    profile = PLATFORM_PROFILES.get(platform, DEFAULT_PROFILE)
+    return CURVE_SHAPES[profile["curve"]], profile["reach_cap"][tier]
 
 
 def _lstm_signal_multiplier(feature_vector: dict) -> float:
@@ -139,14 +211,15 @@ def _lstm_signal_multiplier(feature_vector: dict) -> float:
 
 
 def generate_trajectory(prediction: str, follower_count: int, platform: str,
-                        feature_vector: dict = None) -> list:
+                        content_type: str = None, feature_vector: dict = None) -> list:
     """
     Generates a 4-point (day 1/3/7/10) impression trajectory.
 
-    Magnitude and shape are both driven by the platform's actual distribution model —
-    a follower-count-based reach ceiling per confidence tier, and a decay curve shape
-    specific to that platform (YouTube's slow algorithmic build looks nothing like
-    Twitter's 6-hour spike-and-crash, or LinkedIn's 48-hour peak). The LSTM's text
+    Magnitude and shape are driven by platform + content type's actual distribution
+    model — a follower-count-based reach ceiling per confidence tier, and a decay
+    curve shape specific to that combination (a YouTube news video dies with the
+    news cycle; a YouTube tutorial builds slowly via search; a Short rides the
+    Shorts feed algorithm — see _resolve_trajectory_profile). The LSTM's text
     signal is used only as a bounded tilt on top of that ceiling, never as the
     primary driver — see _lstm_signal_multiplier.
 
@@ -155,9 +228,9 @@ def generate_trajectory(prediction: str, follower_count: int, platform: str,
     thresholds would let the trajectory shape disagree with the badge.
     """
     tier = prediction if prediction in ("HIGH", "MEDIUM", "LOW") else "MEDIUM"
-    profile = PLATFORM_PROFILES.get(platform.lower(), DEFAULT_PROFILE)
-    shape = CURVE_SHAPES[profile["curve"]]
-    ceiling = max(follower_count * profile["reach_cap"][tier], 150)
+    caption = (feature_vector or {}).get("caption", "")
+    shape, cap_fraction = _resolve_trajectory_profile(platform, content_type, tier, _is_topical(caption))
+    ceiling = max(follower_count * cap_fraction, 150)
 
     if feature_vector:
         ceiling *= _lstm_signal_multiplier(feature_vector)
@@ -399,7 +472,7 @@ async def analyze_post(
 
     # Generate trajectory
     trajectory = generate_trajectory(
-        prediction, follower_count, platform,
+        prediction, follower_count, platform, content_type,
         feature_vector={**feature_vector, "caption": caption}
     )
 
